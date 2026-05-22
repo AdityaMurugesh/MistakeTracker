@@ -13,7 +13,7 @@ Every file in the project, the role that owns it, and how to claim a role.
 
 | Role | Name | Branch |
 |---|---|---|
-| Capture | _unclaimed_ | `feat/capture` |
+| Capture | Tanvi | `feat/capture` |
 | Insights | _unclaimed_ | `feat/insights` |
 | Reach & Data | _unclaimed_ | `feat/reach-and-data` |
 
