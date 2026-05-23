@@ -1,38 +1,84 @@
 // Owner: Capture
 // Only this file touches the `entries` table directly.
-//
-// TODO:
-//   - insert(Entry) -> int id
-//   - update(Entry)
-//   - delete(int id)
-//   - getAll({int? limit, DateTime? since}) -> List<Entry>
-//   - getById(int id) -> Entry?
-//   - watchAll() -> Stream<List<Entry>>   (for reactive UI)
+
+import 'dart:async';
+
+import 'package:sqflite/sqflite.dart';
 
 import '../domain/models/entry.dart';
+import 'database.dart';
 
 class EntryDao {
+  EntryDao(this._appDb);
+
+  final AppDatabase _appDb;
+  final StreamController<List<Entry>> _changes =
+      StreamController<List<Entry>>.broadcast();
+
+  Future<Database> _db() => _appDb.db;
+
   Future<int> insert(Entry entry) async {
-    throw UnimplementedError();
+    final db = await _db();
+    final values = entry.toMap()..remove('id');
+    final id = await db.insert('entries', values);
+    await _emit();
+    return id;
   }
 
   Future<void> update(Entry entry) async {
-    throw UnimplementedError();
+    final id = entry.id;
+    if (id == null) {
+      throw ArgumentError('Cannot update an Entry without an id');
+    }
+    final db = await _db();
+    await db.update(
+      'entries',
+      entry.toMap(),
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    await _emit();
   }
 
   Future<void> delete(int id) async {
-    throw UnimplementedError();
+    final db = await _db();
+    await db.delete('entries', where: 'id = ?', whereArgs: [id]);
+    await _emit();
   }
 
   Future<List<Entry>> getAll({int? limit, DateTime? since}) async {
-    throw UnimplementedError();
+    final db = await _db();
+    final rows = await db.query(
+      'entries',
+      where: since != null ? 'occurred_at >= ?' : null,
+      whereArgs: since != null ? [since.toUtc().toIso8601String()] : null,
+      orderBy: 'occurred_at DESC',
+      limit: limit,
+    );
+    return rows.map(Entry.fromMap).toList();
   }
 
   Future<Entry?> getById(int id) async {
-    throw UnimplementedError();
+    final db = await _db();
+    final rows = await db.query(
+      'entries',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return Entry.fromMap(rows.first);
   }
 
-  Stream<List<Entry>> watchAll() {
-    throw UnimplementedError();
+  Stream<List<Entry>> watchAll() async* {
+    yield await getAll();
+    yield* _changes.stream;
   }
+
+  Future<void> _emit() async {
+    if (_changes.isClosed) return;
+    _changes.add(await getAll());
+  }
+
+  Future<void> dispose() => _changes.close();
 }
