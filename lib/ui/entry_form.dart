@@ -128,42 +128,53 @@ class _EntryFormState extends ConsumerState<EntryForm> {
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _busy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
     final dao = ref.read(entryDaoProvider);
-    if (_isEdit) {
-      final updated = widget.existing!.copyWith(
-        what: _what.text.trim(),
-        cause: _orNull(_cause.text),
-        occurredAt: _occurredAt,
-        context: _orNull(_context.text),
-        severity: _severity,
-        costMinutes: _parseOptionalInt(_costMinutes.text),
-        costMoney: _parseOptionalInt(_costMoney.text),
-        moodImpact: _orNull(_moodImpact.text),
-        solution: _orNull(_solution.text),
+    try {
+      if (_isEdit) {
+        final updated = widget.existing!.copyWith(
+          what: _what.text.trim(),
+          cause: _orNull(_cause.text),
+          occurredAt: _occurredAt,
+          context: _orNull(_context.text),
+          severity: _severity,
+          costMinutes: _parseOptionalInt(_costMinutes.text),
+          costMoney: _parseOptionalInt(_costMoney.text),
+          moodImpact: _orNull(_moodImpact.text),
+          solution: _orNull(_solution.text),
+        );
+        await dao.update(updated);
+      } else {
+        final now = DateTime.now();
+        final entry = Entry(
+          what: _what.text.trim(),
+          cause: _orNull(_cause.text),
+          occurredAt: _occurredAt,
+          context: _orNull(_context.text),
+          severity: _severity,
+          costMinutes: _parseOptionalInt(_costMinutes.text),
+          costMoney: _parseOptionalInt(_costMoney.text),
+          moodImpact: _orNull(_moodImpact.text),
+          solution: _orNull(_solution.text),
+          createdAt: now,
+        );
+        await dao.insert(entry);
+      }
+      navigator.pop();
+    } catch (e) {
+      if (mounted) setState(() => _busy = false);
+      messenger.showSnackBar(
+        SnackBar(content: Text("Couldn't save entry: $e")),
       );
-      await dao.update(updated);
-    } else {
-      final now = DateTime.now();
-      final entry = Entry(
-        what: _what.text.trim(),
-        cause: _orNull(_cause.text),
-        occurredAt: _occurredAt,
-        context: _orNull(_context.text),
-        severity: _severity,
-        costMinutes: _parseOptionalInt(_costMinutes.text),
-        costMoney: _parseOptionalInt(_costMoney.text),
-        moodImpact: _orNull(_moodImpact.text),
-        solution: _orNull(_solution.text),
-        createdAt: now,
-      );
-      await dao.insert(entry);
     }
-    if (mounted) Navigator.of(context).pop();
   }
 
   Future<void> _delete() async {
     final id = widget.existing?.id;
     if (id == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -183,8 +194,15 @@ class _EntryFormState extends ConsumerState<EntryForm> {
     );
     if (confirmed != true) return;
     setState(() => _busy = true);
-    await ref.read(entryDaoProvider).delete(id);
-    if (mounted) Navigator.of(context).pop();
+    try {
+      await ref.read(entryDaoProvider).delete(id);
+      navigator.pop();
+    } catch (e) {
+      if (mounted) setState(() => _busy = false);
+      messenger.showSnackBar(
+        SnackBar(content: Text("Couldn't delete entry: $e")),
+      );
+    }
   }
 
   Future<bool> _confirmDiscardIfDirty() async {
