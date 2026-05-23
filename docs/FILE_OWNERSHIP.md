@@ -14,7 +14,7 @@ Every file in the project, the role that owns it, and how to claim a role.
 | Role | Name | Branch |
 |---|---|---|
 | Capture | Tanvi | `feat/capture` |
-| Insights | _unclaimed_ | `feat/insights` |
+| Insights | Aditya | `feat/insights` |
 | Reach & Data | _unclaimed_ | `feat/reach-and-data` |
 
 ## File map
