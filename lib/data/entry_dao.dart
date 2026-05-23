@@ -6,16 +6,15 @@ import 'dart:async';
 import 'package:sqflite/sqflite.dart';
 
 import '../domain/models/entry.dart';
-import 'database.dart';
 
 class EntryDao {
-  EntryDao(this._appDb);
+  EntryDao(this._dbFuture);
 
-  final AppDatabase _appDb;
+  final Future<Database> _dbFuture;
   final StreamController<List<Entry>> _changes =
       StreamController<List<Entry>>.broadcast();
 
-  Future<Database> _db() => _appDb.db;
+  Future<Database> _db() => _dbFuture;
 
   Future<int> insert(Entry entry) async {
     final db = await _db();

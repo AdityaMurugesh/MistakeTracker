@@ -12,7 +12,8 @@ import '../domain/models/entry.dart';
 final appDatabaseProvider = Provider<AppDatabase>((_) => AppDatabase.instance);
 
 final entryDaoProvider = Provider<EntryDao>((ref) {
-  final dao = EntryDao(ref.watch(appDatabaseProvider));
+  final appDb = ref.watch(appDatabaseProvider);
+  final dao = EntryDao(appDb.db);
   ref.onDispose(dao.dispose);
   return dao;
 });
