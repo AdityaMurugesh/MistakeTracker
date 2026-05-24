@@ -112,7 +112,7 @@ class RuleEngine implements SuggestionEngine {
     if (totalMoney > 0 || totalMinutes > 0) {
       final costParts = <String>[];
       if (totalMoney > 0) costParts.add('\$$totalMoney');
-      if (totalMinutes > 0) costParts.add('${totalMinutes}m');
+      if (totalMinutes > 0) costParts.add('$totalMinutes min');
       parts.add('Cost so far: ${costParts.join(' + ')}.');
     }
 

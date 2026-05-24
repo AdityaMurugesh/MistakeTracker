@@ -1288,7 +1288,7 @@ class _EvidenceTile extends StatelessWidget {
     final money = entry.costMoney ?? 0;
     final minutes = entry.costMinutes ?? 0;
     if (money > 0) subtitleParts.add('\$$money');
-    if (minutes > 0) subtitleParts.add('${minutes}m');
+    if (minutes > 0) subtitleParts.add('$minutes min');
 
     return ListTile(
       contentPadding: EdgeInsets.zero,
