@@ -261,6 +261,136 @@ void main() {
     });
   });
 
+  group('RuleEngine — chain detection', () {
+    // Three pairs of (A 23:00, B 02:00) on consecutive nights — gap is 3h,
+    // inside the 6h chain window. Should fire one chain insight.
+    test('3 occurrences of (A->B) within window produce one chain insight',
+        () async {
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 18, 23)),
+        mk(id: 2, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 19, 2)),
+        mk(id: 3, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 19, 23)),
+        mk(id: 4, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 20, 2)),
+        mk(id: 5, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 20, 23)),
+        mk(id: 6, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 21, 2)),
+      ]);
+      final chains = insights
+          .where((i) => i.kind == InsightKind.chain)
+          .toList();
+      expect(chains, hasLength(1));
+      expect(chains.first.title.toLowerCase(),
+          contains('late night scrolling'));
+      expect(chains.first.title.toLowerCase(), contains('missed sleep'));
+      expect(chains.first.evidenceIds, unorderedEquals([1, 2, 3, 4, 5, 6]));
+    });
+
+    test('gap larger than chainWindowHours breaks the chain', () async {
+      // 8h between A and B — outside the 6h window.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 18, 23)),
+        mk(id: 2, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 19, 7)),
+        mk(id: 3, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 19, 23)),
+        mk(id: 4, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 20, 7)),
+        mk(id: 5, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 20, 23)),
+        mk(id: 6, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 21, 7)),
+      ]);
+      expect(insights.where((i) => i.kind == InsightKind.chain), isEmpty);
+    });
+
+    test('2 occurrences are not enough to trigger', () async {
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 19, 23)),
+        mk(id: 2, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 20, 2)),
+        mk(id: 3, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 20, 23)),
+        mk(id: 4, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 21, 2)),
+      ]);
+      expect(insights.where((i) => i.kind == InsightKind.chain), isEmpty);
+    });
+
+    test('same-`what` consecutive entries are not surfaced as a chain',
+        () async {
+      // Three "missed workout" entries back to back within 6h of each other.
+      // The chain rule must NOT emit "missed workout -> missed workout".
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 19, 7)),
+        mk(id: 2, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 19, 10)),
+        mk(id: 3, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 19, 13)),
+        mk(id: 4, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 19, 16)),
+      ]);
+      expect(insights.where((i) => i.kind == InsightKind.chain), isEmpty);
+    });
+
+    test('A-side solution is surfaced as the suggestion', () async {
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'late night scrolling', solution: 'phone in kitchen',
+            occurredAt: DateTime(2026, 5, 20, 23)),
+        mk(id: 2, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 21, 2)),
+        mk(id: 3, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 21, 23)),
+        mk(id: 4, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 22, 2)),
+        mk(id: 5, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 22, 23)),
+        mk(id: 6, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 23, 2)),
+      ]);
+      final chain =
+          insights.firstWhere((i) => i.kind == InsightKind.chain);
+      expect(chain.suggestion, equals('phone in kitchen'));
+    });
+
+    test('out-of-window entries do not appear in evidence ids', () async {
+      // 4th pair lies > 30d before fixedNow, so the lookback filter excludes
+      // entries 7 and 8 entirely. The chain still fires on the 3 in-window
+      // pairs, and the evidence ids must contain ONLY in-window entry ids.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 18, 23)),
+        mk(id: 2, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 19, 2)),
+        mk(id: 3, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 19, 23)),
+        mk(id: 4, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 20, 2)),
+        mk(id: 5, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 5, 20, 23)),
+        mk(id: 6, what: 'missed sleep',
+            occurredAt: DateTime(2026, 5, 21, 2)),
+        // Out of window (more than 30 days before fixedNow May 24 2026).
+        mk(id: 7, what: 'late night scrolling',
+            occurredAt: DateTime(2026, 4, 1, 23)),
+        mk(id: 8, what: 'missed sleep',
+            occurredAt: DateTime(2026, 4, 2, 2)),
+      ]);
+      final chain =
+          insights.firstWhere((i) => i.kind == InsightKind.chain);
+      expect(chain.evidenceIds, isNot(contains(7)));
+      expect(chain.evidenceIds, isNot(contains(8)));
+      expect(chain.evidenceIds, unorderedEquals([1, 2, 3, 4, 5, 6]));
+    });
+  });
+
   group('RuleEngine — cost aggregation', () {
     test('sums costMinutes and costMoney across entries', () async {
       final insights = await engine().analyze([

@@ -39,9 +39,8 @@ class RuleEngine implements SuggestionEngine {
     insights.addAll(_recurringCause(inWindow));
     insights.addAll(_weekdayPattern(inWindow));
     insights.addAll(_hourPattern(inWindow));
+    insights.addAll(_chainDetection(inWindow));
     insights.addAll(_costInsight(inWindow));
-    // TODO: rule 3 — chain detection
-    // TODO: improvement trend insight
 
     return insights;
   }
@@ -139,6 +138,64 @@ class RuleEngine implements SuggestionEngine {
     }
   }
 
+  // Rule 3: chain detection.
+  // For each entry A, look at the immediately next chronological entry B.
+  // If B falls within chainWindowHours of A and has a different `what`, count
+  // the (A.what -> B.what) pair. Surface pairs with >= threshold occurrences.
+  //
+  // Same-`what` consecutive entries are skipped here — they're already
+  // covered by the recurring-cause / weekday / hour rules and would just be
+  // noise as "X often leads to X".
+  Iterable<Insight> _chainDetection(List<Entry> entries) sync* {
+    if (entries.length < 2) return;
+    final sorted = [...entries]
+      ..sort((a, b) => a.occurredAt.compareTo(b.occurredAt));
+    const window = Duration(hours: chainWindowHours);
+
+    final pairs = <String, List<List<Entry>>>{};
+    for (var i = 0; i < sorted.length - 1; i++) {
+      final a = sorted[i];
+      final b = sorted[i + 1];
+      if (b.occurredAt.difference(a.occurredAt) > window) continue;
+      final aWhat = _normalize(a.what);
+      final bWhat = _normalize(b.what);
+      if (aWhat == null || bWhat == null) continue;
+      if (aWhat == bWhat) continue;
+      (pairs['$aWhat|$bWhat'] ??= []).add([a, b]);
+    }
+
+    for (final key in _sortKeysByCountDesc(pairs)) {
+      final occurrences = pairs[key]!;
+      if (occurrences.length < minOccurrencesForPattern) continue;
+
+      final aDisplay = occurrences.first[0].what.trim();
+      final bDisplay = occurrences.first[1].what.trim();
+
+      final idSet = <int>{};
+      for (final pair in occurrences) {
+        for (final e in pair) {
+          if (e.id != null) idSet.add(e.id!);
+        }
+      }
+      final ids = idSet.toList()..sort();
+
+      // Suggestion: most recent solution from the A side (the trigger), since
+      // that's where the user would intervene to break the chain.
+      final aEntries = [for (final p in occurrences) p[0]]
+        ..sort((x, y) => y.occurredAt.compareTo(x.occurredAt));
+
+      yield Insight(
+        kind: InsightKind.chain,
+        title: '"$aDisplay" often leads to "$bDisplay"',
+        body:
+            '${occurrences.length} times in the last $lookbackDays days, '
+            'within $chainWindowHours hours.',
+        evidenceIds: ids,
+        suggestion: _firstSolution(aEntries),
+      );
+    }
+  }
+
   // Cost insight: sum costMinutes and costMoney within the lookback window.
   Iterable<Insight> _costInsight(List<Entry> entries) sync* {
     var minutes = 0;
@@ -186,7 +243,7 @@ class RuleEngine implements SuggestionEngine {
   }
 
   // Stable ordering: descending count, then alphabetical key.
-  List<String> _sortKeysByCountDesc(Map<String, List<Entry>> groups) {
+  List<String> _sortKeysByCountDesc<T>(Map<String, List<T>> groups) {
     final keys = groups.keys.toList();
     keys.sort((a, b) {
       final cmp = groups[b]!.length.compareTo(groups[a]!.length);
