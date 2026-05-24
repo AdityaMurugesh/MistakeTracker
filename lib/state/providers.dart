@@ -3,7 +3,7 @@
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/database.dart';
@@ -154,6 +154,27 @@ class _InMemoryEntryDao implements EntryDao {
 
   @override
   Future<void> dispose() => _changes.close();
+}
+
+// ---- Debug seeding ----------------------------------------------------------
+
+/// Call from main() before runApp(). On debug builds running on a native
+/// platform with an empty entries table, this populates the table with the
+/// demo seed so the app opens to a fully-loaded Insights screen instead of
+/// an empty one. No-op on web (web has its own in-memory seeded DAO), no-op
+/// on release builds, no-op if any entries already exist.
+Future<void> seedIfDebugAndEmpty() async {
+  if (kIsWeb || !kDebugMode) return;
+  final dao = EntryDao(AppDatabase.instance.db);
+  try {
+    final existing = await dao.getAll(limit: 1);
+    if (existing.isNotEmpty) return;
+    for (final e in _demoSeedEntries()) {
+      await dao.insert(e);
+    }
+  } finally {
+    await dao.dispose();
+  }
 }
 
 // ---- Demo seed (used by web fallback DAO and as a fixture for demos) -------
