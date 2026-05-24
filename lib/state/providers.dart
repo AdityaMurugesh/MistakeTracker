@@ -64,6 +64,14 @@ final forecastsProvider = FutureProvider<List<Forecast>>((ref) async {
   return engine.forecast(entries);
 });
 
+/// Short narrative summary of the last 7 days. Null when there's no
+/// recent activity.
+final narrativeProvider = FutureProvider<String?>((ref) async {
+  final entries = await ref.watch(entriesStreamProvider.future);
+  final engine = ref.read(ruleEngineProvider);
+  return engine.narrative(entries);
+});
+
 // ---- Reach & Data -----------------------------------------------------------
 // (exportServiceProvider, notifierProvider, timeSignalProvider go here)
 
@@ -184,15 +192,27 @@ List<Entry> _demoSeedEntries() {
 
   final entries = <Entry>[];
 
-  // Missed workouts: Mondays 7am, last 3 weeks. Triggers recurring-cause
-  // ("tired"), weekday pattern (Monday), and hour pattern (7 AM).
+  // Missed workouts: Mondays 7am, last 3 weeks. Triggers recurring-cause,
+  // weekday pattern (Monday), and hour pattern (7 AM). The cause is phrased
+  // three different ways (tired / exhausted / drained) on purpose — the
+  // semantic layer should merge them into one "tired" pattern instead of
+  // leaving each at count 1. Two of the three `what`s are phrased differently
+  // too (skipped workout / no gym today) so the weekday/hour rule has to
+  // bridge "missed workout" ≈ "skipped workout" ≈ "no gym today" via
+  // conceptKey.
+  const workoutPhrasings = [
+    ('missed workout', 'tired', 'lay out gear the night before'),
+    ('skipped workout', 'exhausted', null),
+    ('no gym today', 'drained', null),
+  ];
   for (var w = 0; w < 3; w++) {
+    final p = workoutPhrasings[w];
     entries.add(mk(
       id: entries.length + 1,
-      what: 'missed workout',
-      cause: 'tired',
+      what: p.$1,
+      cause: p.$2,
       occurredAt: atRecentWeekday(monday, 7, weeksAgo: w),
-      solution: w == 0 ? 'lay out gear the night before' : null,
+      solution: p.$3,
     ));
   }
 
@@ -217,29 +237,38 @@ List<Entry> _demoSeedEntries() {
     costMinutes: 20,
   ));
 
-  // Chain seed: "argument with roommate" -> "couldn't sleep", 3 weeks running.
-  // Weekday/hour vary across the three pairs so this only trips the chain
-  // rule (not the weekday or hour pattern rules).
-  const chainPairs = <List<int>>[
-    [2, 20, 23], // Tue 8 PM -> Tue 11 PM
-    [3, 19, 23], // Wed 7 PM -> Wed 11 PM
-    [4, 21, 23], // Thu 9 PM -> Thu 11 PM
+  // Cascade seed: a 3-step chain of "argument with roommate" -> "couldn't
+  // sleep" -> "missed run", three weeks running. Weekdays vary across the
+  // triples so this only fires the chain / multi-step rules, not weekday
+  // or hour patterns. The "missed run" steps share the workout concept key
+  // with the Monday cluster above, which lets the RAG suggestion path
+  // surface the user's "lay out gear" solution on the cascade card.
+  const cascadeRows = <(int, int, int, int)>[
+    // (weekday, trigger hr, consequence hr, next-day-step hr)
+    (2, 20, 23, 5), // Tue 8 PM → Tue 11 PM → Wed 5 AM
+    (3, 19, 23, 5), // Wed 7 PM → Wed 11 PM → Thu 5 AM
+    (4, 21, 23, 5), // Thu 9 PM → Thu 11 PM → Fri 5 AM
   ];
-  for (var w = 0; w < chainPairs.length; w++) {
-    final p = chainPairs[w];
-    final trigger = atRecentWeekday(p[0], p[1], weeksAgo: w);
-    final consequence = atRecentWeekday(p[0], p[2], weeksAgo: w);
+  for (var w = 0; w < cascadeRows.length; w++) {
+    final row = cascadeRows[w];
+    final triggerWd = row.$1;
+    final nextDayWd = (triggerWd % 7) + 1;
     entries.add(mk(
       id: entries.length + 1,
       what: 'argument with roommate',
-      occurredAt: trigger,
+      occurredAt: atRecentWeekday(triggerWd, row.$2, weeksAgo: w),
       solution: w == 0 ? 'walk it off before bed' : null,
     ));
     entries.add(mk(
       id: entries.length + 1,
       what: "couldn't sleep",
-      occurredAt: consequence,
+      occurredAt: atRecentWeekday(triggerWd, row.$3, weeksAgo: w),
       costMinutes: 60,
+    ));
+    entries.add(mk(
+      id: entries.length + 1,
+      what: 'missed run',
+      occurredAt: atRecentWeekday(nextDayWd, row.$4, weeksAgo: w),
     ));
   }
 

@@ -6,17 +6,23 @@
 //   2. Time-of-day pattern   — (what, weekday) and (what, hour) buckets >=3
 //   3. Chain detection       — (A.what -> B.what) within 6h, >=3 times
 //   4. Cross-cause chain     — (a.cause -> b.what) within 24h, >=3 times
-//   5. Cost aggregation      — sum costMinutes / costMoney + yearly projection
-//   6. Streak / improvement  — `what` quiet for notably longer than usual
+//   5. Multi-step chain      — A -> B -> C cascade >=3 times
+//   6. Cost aggregation      — sum costMinutes / costMoney + yearly projection
+//   7. Streak / improvement  — `what` quiet for notably longer than usual
+//   8. Anomaly week          — last 7d notably worse than the prior 4 weeks
+//
+// All grouping keys go through a Semantic layer so "missed gym" and
+// "skipped workout" merge into one pattern instead of staying split.
+// Suggestions fall back to RAG-style retrieval over the user's other
+// semantically-similar entries when there's no in-group past solution.
 //
 // Forecasts (forward-looking projections) live in a separate method,
 // RuleEngine.forecast(entries), since they don't fit the SuggestionEngine
 // contract.
 //
-// Plus: suggestion text = user's own past `solution` for the same `what`, if any.
-//
 // All thresholds are constants below — tweak in one place.
 
+import 'semantic.dart';
 import 'suggestion_engine.dart';
 import 'models/entry.dart';
 import 'models/forecast.dart';
@@ -30,11 +36,18 @@ class RuleEngine implements SuggestionEngine {
   static const int crossCauseWindowHours = 24;
   static const int streakLookbackDays = 60;
   static const int streakMinDaysSince = 7;
+  static const int multiStepWindowHours = 24;
+  static const int anomalyPriorWeeks = 4;
+  static const double anomalyMultiplier = 2.0;
+  static const double ragMinSimilarity = 0.45;
 
   /// Injected "now" for tests; defaults to DateTime.now().
   final DateTime Function() _now;
+  final Semantic _semantic;
 
-  RuleEngine({DateTime Function()? now}) : _now = (now ?? DateTime.now);
+  RuleEngine({DateTime Function()? now, Semantic? semantic})
+      : _now = (now ?? DateTime.now),
+        _semantic = semantic ?? const Semantic();
 
   @override
   Future<List<Insight>> analyze(List<Entry> entries) async {
@@ -46,15 +59,64 @@ class RuleEngine implements SuggestionEngine {
         .where((e) => !e.occurredAt.isBefore(windowStart))
         .toList(growable: false);
 
-    insights.addAll(_recurringCause(inWindow));
-    insights.addAll(_weekdayPattern(inWindow));
-    insights.addAll(_hourPattern(inWindow));
-    insights.addAll(_chainDetection(inWindow));
+    insights.addAll(_anomalyWeek(entries));
+    insights.addAll(_recurringCause(inWindow, entries));
+    insights.addAll(_weekdayPattern(inWindow, entries));
+    insights.addAll(_hourPattern(inWindow, entries));
+    insights.addAll(_chainDetection(inWindow, entries));
+    insights.addAll(_multiStepChain(inWindow));
     insights.addAll(_crossCauseChain(inWindow));
     insights.addAll(_costInsight(inWindow));
     insights.addAll(_streakInsight(entries)); // uses extended window
 
     return insights;
+  }
+
+  /// Composes a short narrative summary of the user's last 7 days, suitable
+  /// for a hero card at the top of the Insights screen. Reads from the same
+  /// data the rules use; the wording is templated, not generated.
+  String? narrative(List<Entry> entries) {
+    final now = _now();
+    final weekStart = now.subtract(const Duration(days: 7));
+    final week = entries
+        .where((e) => !e.occurredAt.isBefore(weekStart))
+        .toList(growable: false);
+    if (week.isEmpty) return null;
+
+    // Dominant concept this week.
+    final byConcept = <String, List<Entry>>{};
+    for (final e in week) {
+      final k = _semantic.conceptKey(e.what);
+      if (k == null) continue;
+      (byConcept[k] ??= []).add(e);
+    }
+    final ranked = byConcept.entries.toList()
+      ..sort((a, b) => b.value.length.compareTo(a.value.length));
+
+    final parts = <String>[];
+    parts.add(
+        'You logged ${week.length} failure${week.length == 1 ? '' : 's'} this week.');
+
+    if (ranked.isNotEmpty && ranked.first.value.length >= 2) {
+      final dominantWhat = ranked.first.value.first.what.trim();
+      parts.add(
+          '"$dominantWhat" was the loudest signal (${ranked.first.value.length}x).');
+    }
+
+    var totalMoney = 0;
+    var totalMinutes = 0;
+    for (final e in week) {
+      totalMoney += e.costMoney ?? 0;
+      totalMinutes += e.costMinutes ?? 0;
+    }
+    if (totalMoney > 0 || totalMinutes > 0) {
+      final costParts = <String>[];
+      if (totalMoney > 0) costParts.add('\$$totalMoney');
+      if (totalMinutes > 0) costParts.add('${totalMinutes}m');
+      parts.add('Cost so far: ${costParts.join(' + ')}.');
+    }
+
+    return parts.join(' ');
   }
 
   /// Forward-looking: projects the next likely occurrence of each strong
@@ -68,7 +130,7 @@ class RuleEngine implements SuggestionEngine {
 
     final triples = <String, List<Entry>>{};
     for (final e in inWindow) {
-      final what = _normalize(e.what);
+      final what = _semantic.conceptKey(e.what);
       if (what == null) continue;
       final local = e.occurredAt.toLocal();
       (triples['$what|${local.weekday}|${local.hour}'] ??= []).add(e);
@@ -94,13 +156,17 @@ class RuleEngine implements SuggestionEngine {
   }
 
   // Rule 1: recurring cause.
-  // Group entries by normalized cause; for any cause with >= threshold occurrences,
-  // emit a pattern Insight whose suggestion is the user's own past `solution`
-  // (most recent non-empty) for the same cause, if any.
-  Iterable<Insight> _recurringCause(List<Entry> entries) sync* {
+  // Group entries by the cause's concept key (so "Tired" / "exhausted" /
+  // "sleepy" merge into one). For any cluster with >= threshold occurrences,
+  // emit a pattern Insight; suggestion = user's past solution for the same
+  // cause if any, else a RAG-style borrow from a semantically similar entry.
+  Iterable<Insight> _recurringCause(
+    List<Entry> entries,
+    List<Entry> allEntries,
+  ) sync* {
     final byCause = <String, List<Entry>>{};
     for (final e in entries) {
-      final key = _normalize(e.cause);
+      final key = _semantic.conceptKey(e.cause);
       if (key == null) continue;
       (byCause[key] ??= []).add(e);
     }
@@ -118,18 +184,24 @@ class RuleEngine implements SuggestionEngine {
         body:
             '${group.length} entries in the last $lookbackDays days share this cause.',
         evidenceIds: _idsOf(group),
-        suggestion: _firstSolution(group),
+        suggestion: _suggestionFor(
+          group: group,
+          allEntries: allEntries,
+          queryOverride: group.first.cause,
+        ),
       );
     }
   }
 
   // Rule 2a: weekday pattern.
-  // For each (normalized what, weekday) pair, emit a pattern Insight when
-  // count >= threshold. E.g. "'missed workout' on Mondays — 3 in the last 30d".
-  Iterable<Insight> _weekdayPattern(List<Entry> entries) sync* {
+  // (what conceptKey, weekday) pairs with >= threshold occurrences.
+  Iterable<Insight> _weekdayPattern(
+    List<Entry> entries,
+    List<Entry> allEntries,
+  ) sync* {
     final groups = <String, List<Entry>>{};
     for (final e in entries) {
-      final what = _normalize(e.what);
+      final what = _semantic.conceptKey(e.what);
       if (what == null) continue;
       final wd = e.occurredAt.toLocal().weekday;
       (groups['$what|$wd'] ??= []).add(e);
@@ -149,18 +221,20 @@ class RuleEngine implements SuggestionEngine {
         body:
             '${group.length} of these landed on a $wdName in the last $lookbackDays days.',
         evidenceIds: _idsOf(group),
-        suggestion: _firstSolution(group),
+        suggestion: _suggestionFor(group: group, allEntries: allEntries),
       );
     }
   }
 
   // Rule 2b: hour-of-day pattern.
-  // For each (normalized what, local hour) pair, emit a pattern Insight when
-  // count >= threshold.
-  Iterable<Insight> _hourPattern(List<Entry> entries) sync* {
+  // (what conceptKey, local hour) pairs with >= threshold occurrences.
+  Iterable<Insight> _hourPattern(
+    List<Entry> entries,
+    List<Entry> allEntries,
+  ) sync* {
     final groups = <String, List<Entry>>{};
     for (final e in entries) {
-      final what = _normalize(e.what);
+      final what = _semantic.conceptKey(e.what);
       if (what == null) continue;
       final hour = e.occurredAt.toLocal().hour;
       (groups['$what|$hour'] ??= []).add(e);
@@ -181,7 +255,7 @@ class RuleEngine implements SuggestionEngine {
         body:
             '${group.length} of these happened around $hourLabel in the last $lookbackDays days.',
         evidenceIds: _idsOf(group),
-        suggestion: _firstSolution(group),
+        suggestion: _suggestionFor(group: group, allEntries: allEntries),
       );
     }
   }
@@ -194,7 +268,10 @@ class RuleEngine implements SuggestionEngine {
   // Same-`what` consecutive entries are skipped here — they're already
   // covered by the recurring-cause / weekday / hour rules and would just be
   // noise as "X often leads to X".
-  Iterable<Insight> _chainDetection(List<Entry> entries) sync* {
+  Iterable<Insight> _chainDetection(
+    List<Entry> entries,
+    List<Entry> allEntries,
+  ) sync* {
     if (entries.length < 2) return;
     final sorted = [...entries]
       ..sort((a, b) => a.occurredAt.compareTo(b.occurredAt));
@@ -205,8 +282,8 @@ class RuleEngine implements SuggestionEngine {
       final a = sorted[i];
       final b = sorted[i + 1];
       if (b.occurredAt.difference(a.occurredAt) > window) continue;
-      final aWhat = _normalize(a.what);
-      final bWhat = _normalize(b.what);
+      final aWhat = _semantic.conceptKey(a.what);
+      final bWhat = _semantic.conceptKey(b.what);
       if (aWhat == null || bWhat == null) continue;
       if (aWhat == bWhat) continue;
       (pairs['$aWhat|$bWhat'] ??= []).add([a, b]);
@@ -227,10 +304,9 @@ class RuleEngine implements SuggestionEngine {
       }
       final ids = idSet.toList()..sort();
 
-      // Suggestion: most recent solution from the A side (the trigger), since
-      // that's where the user would intervene to break the chain.
-      final aEntries = [for (final p in occurrences) p[0]]
-        ..sort((x, y) => y.occurredAt.compareTo(x.occurredAt));
+      // Suggestion: solution from the A side (the trigger), since that's
+      // where the user would intervene to break the chain.
+      final aEntries = [for (final p in occurrences) p[0]];
 
       yield Insight(
         kind: InsightKind.chain,
@@ -239,7 +315,60 @@ class RuleEngine implements SuggestionEngine {
             '${occurrences.length} times in the last $lookbackDays days, '
             'within $chainWindowHours hours.',
         evidenceIds: ids,
-        suggestion: _firstSolution(aEntries),
+        suggestion: _suggestionFor(group: aEntries, allEntries: allEntries),
+      );
+    }
+  }
+
+  // Rule 5: multi-step chain (A -> B -> C).
+  // Walks the chronological entry list and counts every triple
+  // (entry[i], entry[i+1], entry[i+2]) where:
+  //   • each successive gap is within multiStepWindowHours
+  //   • all three concept-keys are distinct
+  // Triples with >= threshold occurrences become a cascade insight.
+  Iterable<Insight> _multiStepChain(List<Entry> entries) sync* {
+    if (entries.length < 3) return;
+    final sorted = [...entries]
+      ..sort((a, b) => a.occurredAt.compareTo(b.occurredAt));
+    const window = Duration(hours: multiStepWindowHours);
+
+    final triples = <String, List<List<Entry>>>{};
+    for (var i = 0; i < sorted.length - 2; i++) {
+      final a = sorted[i];
+      final b = sorted[i + 1];
+      final c = sorted[i + 2];
+      if (b.occurredAt.difference(a.occurredAt) > window) continue;
+      if (c.occurredAt.difference(b.occurredAt) > window) continue;
+      final ka = _semantic.conceptKey(a.what);
+      final kb = _semantic.conceptKey(b.what);
+      final kc = _semantic.conceptKey(c.what);
+      if (ka == null || kb == null || kc == null) continue;
+      if (ka == kb || kb == kc || ka == kc) continue;
+      (triples['$ka|$kb|$kc'] ??= []).add([a, b, c]);
+    }
+
+    for (final key in _sortKeysByCountDesc(triples)) {
+      final occurrences = triples[key]!;
+      if (occurrences.length < minOccurrencesForPattern) continue;
+
+      final aDisplay = occurrences.first[0].what.trim();
+      final bDisplay = occurrences.first[1].what.trim();
+      final cDisplay = occurrences.first[2].what.trim();
+
+      final idSet = <int>{};
+      for (final triple in occurrences) {
+        for (final e in triple) {
+          if (e.id != null) idSet.add(e.id!);
+        }
+      }
+
+      yield Insight(
+        kind: InsightKind.chain,
+        title: '"$aDisplay" → "$bDisplay" → "$cDisplay"',
+        body:
+            'This 3-step cascade fired ${occurrences.length} times. '
+            'Stopping it early breaks the whole chain.',
+        evidenceIds: idSet.toList()..sort(),
       );
     }
   }
@@ -261,9 +390,9 @@ class RuleEngine implements SuggestionEngine {
       final a = sorted[i];
       final b = sorted[i + 1];
       if (b.occurredAt.difference(a.occurredAt) > window) continue;
-      final aCause = _normalize(a.cause);
-      final aWhat = _normalize(a.what);
-      final bWhat = _normalize(b.what);
+      final aCause = _semantic.conceptKey(a.cause);
+      final aWhat = _semantic.conceptKey(a.what);
+      final bWhat = _semantic.conceptKey(b.what);
       if (aCause == null || aWhat == null || bWhat == null) continue;
       if (aWhat == bWhat) continue; // already covered by recurring rules
       (pairs['$aCause||$bWhat'] ??= []).add([a, b]);
@@ -348,7 +477,7 @@ class RuleEngine implements SuggestionEngine {
 
     final byWhat = <String, List<Entry>>{};
     for (final e in filtered) {
-      final w = _normalize(e.what);
+      final w = _semantic.conceptKey(e.what);
       if (w == null) continue;
       (byWhat[w] ??= []).add(e);
     }
@@ -383,23 +512,85 @@ class RuleEngine implements SuggestionEngine {
     }
   }
 
-  // --- helpers ---
+  // Rule 8: anomaly week.
+  // Compares the last 7 days' failure count to the average count per week
+  // over the prior anomalyPriorWeeks. If notably worse (>= anomalyMultiplier
+  // and at least 3 events), surface as a pattern insight at the top.
+  Iterable<Insight> _anomalyWeek(List<Entry> entries) sync* {
+    final now = _now();
+    final lastWeekStart = now.subtract(const Duration(days: 7));
+    final priorStart =
+        now.subtract(const Duration(days: 7 * (anomalyPriorWeeks + 1)));
 
-  String? _normalize(String? s) {
-    if (s == null) return null;
-    final t = s.trim().toLowerCase();
-    return t.isEmpty ? null : t;
+    final lastWeek = <Entry>[];
+    final priorPeriod = <Entry>[];
+    for (final e in entries) {
+      if (!e.occurredAt.isBefore(lastWeekStart)) {
+        lastWeek.add(e);
+      } else if (e.occurredAt.isAfter(priorStart)) {
+        priorPeriod.add(e);
+      }
+    }
+    if (lastWeek.length < 3) return;
+    if (priorPeriod.isEmpty) return;
+
+    final avgPriorPerWeek = priorPeriod.length / anomalyPriorWeeks;
+    if (avgPriorPerWeek < 1) return;
+
+    final ratio = lastWeek.length / avgPriorPerWeek;
+    if (ratio < anomalyMultiplier) return;
+
+    yield Insight(
+      kind: InsightKind.pattern,
+      title:
+          'This week is ${ratio.toStringAsFixed(1)}x worse than usual',
+      body:
+          'You logged ${lastWeek.length} failures this week vs '
+          '${avgPriorPerWeek.toStringAsFixed(1)} avg over the prior '
+          '$anomalyPriorWeeks weeks.',
+      evidenceIds: [for (final e in lastWeek) if (e.id != null) e.id!],
+    );
   }
+
+  // --- helpers ---
 
   List<int> _idsOf(List<Entry> entries) =>
       [for (final e in entries) if (e.id != null) e.id!];
 
-  String? _firstSolution(List<Entry> entriesNewestFirst) {
-    for (final e in entriesNewestFirst) {
+  /// Suggestion text for an insight.
+  ///
+  /// 1. Direct: most recent non-empty solution from inside the group.
+  /// 2. RAG: if no in-group solution, retrieve the user's other entries by
+  ///    similarity to the group's representative text, and surface the top
+  ///    similar entry's solution. Labeled with "From \"$what\":" so the user
+  ///    can tell when a suggestion is borrowed from a related-but-different
+  ///    entry rather than being theirs verbatim.
+  String? _suggestionFor({
+    required List<Entry> group,
+    required List<Entry> allEntries,
+    String? queryOverride,
+  }) {
+    final newest = [...group]
+      ..sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
+    for (final e in newest) {
       final s = e.solution?.trim();
       if (s != null && s.isNotEmpty) return s;
     }
-    return null;
+
+    final query = queryOverride ?? group.first.what;
+    final inGroupIds = {for (final g in group) if (g.id != null) g.id!};
+    final ranked = <(double, Entry)>[];
+    for (final e in allEntries) {
+      if (e.id != null && inGroupIds.contains(e.id)) continue;
+      final sol = e.solution?.trim();
+      if (sol == null || sol.isEmpty) continue;
+      final sim = _semantic.similarity(query, e.what);
+      if (sim >= ragMinSimilarity) ranked.add((sim, e));
+    }
+    if (ranked.isEmpty) return null;
+    ranked.sort((a, b) => b.$1.compareTo(a.$1));
+    final top = ranked.first.$2;
+    return 'From "${top.what.trim()}": ${top.solution!.trim()}';
   }
 
   // Stable ordering: descending count, then alphabetical key.

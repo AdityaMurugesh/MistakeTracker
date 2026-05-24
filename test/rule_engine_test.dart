@@ -620,4 +620,185 @@ void main() {
           forecasts.first.nextAt.isBefore(forecasts.last.nextAt), isTrue);
     });
   });
+
+  group('RuleEngine — semantic grouping', () {
+    test(
+        'fuzzy `what` synonyms (missed gym + skipped workout) merge into '
+        'one pattern', () async {
+      // 3 entries on Mondays at 7 AM phrased two different ways. With
+      // exact-string matching this would be 1 "missed gym" + 2 "skipped
+      // workout" (no pattern), but the semantic layer should merge them
+      // into a single weekday/hour pattern.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'missed gym',
+            occurredAt: DateTime(2026, 5, 4, 7)),
+        mk(id: 2, what: 'skipped workout',
+            occurredAt: DateTime(2026, 5, 11, 7)),
+        mk(id: 3, what: 'skipped workout',
+            occurredAt: DateTime(2026, 5, 18, 7)),
+      ]);
+      final patterns = insights
+          .where((i) =>
+              i.kind == InsightKind.pattern && i.title.contains('Monday'))
+          .toList();
+      expect(patterns, hasLength(1));
+      expect(patterns.first.evidenceIds, unorderedEquals([1, 2, 3]));
+    });
+
+    test('cause synonyms merge (tired + exhausted)', () async {
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'a', cause: 'tired', daysAgo: 1),
+        mk(id: 2, what: 'b', cause: 'exhausted', daysAgo: 4),
+        mk(id: 3, what: 'c', cause: 'tired', daysAgo: 8),
+      ]);
+      final recurring = insights
+          .where((i) =>
+              i.kind == InsightKind.pattern && i.title.contains('keeps'))
+          .toList();
+      expect(recurring, hasLength(1));
+      expect(recurring.first.evidenceIds, unorderedEquals([1, 2, 3]));
+    });
+  });
+
+  group('RuleEngine — multi-step chain', () {
+    test('3 A->B->C cascades within window fire one cascade insight',
+        () async {
+      // Three nightly cascades: argument → bad sleep → missed workout.
+      // Gaps: 3h then 5h, both within multiStepWindowHours.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'argument',
+            occurredAt: DateTime(2026, 5, 18, 20)),
+        mk(id: 2, what: "couldn't sleep",
+            occurredAt: DateTime(2026, 5, 18, 23)),
+        mk(id: 3, what: 'missed run',
+            occurredAt: DateTime(2026, 5, 19, 4)),
+        mk(id: 4, what: 'argument',
+            occurredAt: DateTime(2026, 5, 19, 20)),
+        mk(id: 5, what: "couldn't sleep",
+            occurredAt: DateTime(2026, 5, 19, 23)),
+        mk(id: 6, what: 'missed run',
+            occurredAt: DateTime(2026, 5, 20, 4)),
+        mk(id: 7, what: 'argument',
+            occurredAt: DateTime(2026, 5, 20, 20)),
+        mk(id: 8, what: "couldn't sleep",
+            occurredAt: DateTime(2026, 5, 20, 23)),
+        mk(id: 9, what: 'missed run',
+            occurredAt: DateTime(2026, 5, 21, 4)),
+      ]);
+      final cascades = insights
+          .where((i) =>
+              i.kind == InsightKind.chain &&
+              i.title.contains('→') &&
+              i.title.contains('argument'))
+          .toList();
+      expect(cascades, hasLength(1));
+      expect(cascades.first.evidenceIds.length, greaterThanOrEqualTo(9));
+    });
+
+    test('cascade with same-concept B and C is skipped', () async {
+      // Middle and end both "missed workout" → only the depth-2 chain fires,
+      // not a depth-3 with two same-concept steps.
+      final insights = await engine().analyze([
+        for (var i = 0; i < 3; i++) ...[
+          mk(id: i * 3 + 1, what: 'argument',
+              occurredAt: DateTime(2026, 5, 18 + i, 20)),
+          mk(id: i * 3 + 2, what: 'missed workout',
+              occurredAt: DateTime(2026, 5, 18 + i, 23)),
+          mk(id: i * 3 + 3, what: 'missed workout',
+              occurredAt: DateTime(2026, 5, 19 + i, 4)),
+        ],
+      ]);
+      expect(
+          insights.where((i) =>
+              i.kind == InsightKind.chain &&
+              i.title.contains('→') &&
+              i.title.split('→').length == 3),
+          isEmpty);
+    });
+  });
+
+  group('RuleEngine — anomaly week', () {
+    test('last 7d notably worse than the prior 4 weeks emits anomaly',
+        () async {
+      // 6 entries this week, 1 in each of the 4 prior weeks (avg 1/wk).
+      // 6 / 1 = 6.0x, well over the 2x threshold.
+      final insights = await engine().analyze([
+        // Prior 4 weeks: 1 entry each
+        mk(id: 1, what: 'a', daysAgo: 10),
+        mk(id: 2, what: 'a', daysAgo: 17),
+        mk(id: 3, what: 'a', daysAgo: 24),
+        mk(id: 4, what: 'a', daysAgo: 30),
+        // This week: 6 entries
+        for (var i = 5; i < 11; i++)
+          mk(id: i, what: 'a', daysAgo: 1),
+      ]);
+      expect(
+          insights.where((i) => i.title.toLowerCase().contains('worse than')),
+          hasLength(1));
+    });
+
+    test('no anomaly when this week is in line with prior weeks', () async {
+      final insights = await engine().analyze([
+        for (var i = 1; i <= 8; i++) mk(id: i, what: 'a', daysAgo: i * 4),
+      ]);
+      expect(
+          insights.where((i) => i.title.toLowerCase().contains('worse than')),
+          isEmpty);
+    });
+  });
+
+  group('RuleEngine — narrative', () {
+    test('returns null when no entries in the last 7 days', () {
+      final n = engine().narrative([
+        mk(id: 1, what: 'x', daysAgo: 30),
+      ]);
+      expect(n, isNull);
+    });
+
+    test('mentions count, dominant what, and total cost', () {
+      final n = engine().narrative([
+        mk(id: 1, what: 'missed gym', daysAgo: 1, costMinutes: 30),
+        mk(id: 2, what: 'skipped workout', daysAgo: 2, costMinutes: 30),
+        mk(id: 3, what: 'something else',
+            daysAgo: 3, costMoney: 50),
+      ]);
+      expect(n, isNotNull);
+      expect(n!, contains('3'));
+      expect(n.toLowerCase(), contains('week'));
+      // The dominant cluster (missed gym + skipped workout via semantic)
+      // should be quoted.
+      expect(n, contains('"missed gym"'));
+    });
+  });
+
+  group('RuleEngine — RAG suggestion fallback', () {
+    test('borrows a solution from a semantically similar past entry',
+        () async {
+      // Three "skipped workout" entries forming a Tuesday-weekday pattern.
+      // No solutions on any of them. A separate "missed gym" entry sits on
+      // a Sunday with a solution — same concept key but different weekday,
+      // so it does NOT join the Tuesday group. The RAG fallback should
+      // surface its solution prefixed with `From "missed gym":`.
+      final allEntries = [
+        mk(id: 1, what: 'skipped workout',
+            occurredAt: DateTime(2026, 5, 5, 7)),
+        mk(id: 2, what: 'skipped workout',
+            occurredAt: DateTime(2026, 5, 12, 7)),
+        mk(id: 3, what: 'skipped workout',
+            occurredAt: DateTime(2026, 5, 19, 7)),
+        mk(
+            id: 99,
+            what: 'missed gym',
+            solution: 'lay out clothes the night before',
+            occurredAt: DateTime(2026, 5, 17, 7)),
+      ];
+      final insights = await engine().analyze(allEntries);
+      final p = insights.firstWhere((i) =>
+          i.kind == InsightKind.pattern &&
+          i.title.contains('Tuesday'));
+      expect(p.suggestion, isNotNull);
+      expect(p.suggestion!, startsWith('From "missed gym":'));
+      expect(p.suggestion!, contains('lay out clothes'));
+    });
+  });
 }
