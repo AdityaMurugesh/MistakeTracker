@@ -18,7 +18,13 @@ class InsightsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final insightsAsync = ref.watch(insightsProvider);
+    final entriesAsync = ref.watch(entriesStreamProvider);
     final scheme = Theme.of(context).colorScheme;
+
+    final severityById = <int, int>{
+      for (final e in entriesAsync.valueOrNull ?? const <Entry>[])
+        if (e.id != null) e.id!: e.severity,
+    };
 
     return Scaffold(
       backgroundColor: scheme.surface,
@@ -26,8 +32,10 @@ class InsightsScreen extends ConsumerWidget {
         onRefresh: () async {
           ref.invalidate(insightsProvider);
           ref.invalidate(forecastsProvider);
+          ref.invalidate(narrativeProvider);
           await ref.read(insightsProvider.future);
           await ref.read(forecastsProvider.future);
+          await ref.read(narrativeProvider.future);
         },
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
@@ -59,16 +67,17 @@ class InsightsScreen extends ConsumerWidget {
                     child: _EmptyState(),
                   );
                 }
-                final ranked = _rankByImpact(insights);
+                final ranked = _rankByImpact(insights, severityById);
                 return SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
                   sliver: SliverList.builder(
-                    itemCount: ranked.length + 3,
+                    itemCount: ranked.length + 4,
                     itemBuilder: (context, i) {
-                      if (i == 0) return _SummaryHeader(insights: ranked);
-                      if (i == 1) return const _ComingUpPanel();
-                      if (i == 2) return const _Heatmap();
-                      final idx = i - 3;
+                      if (i == 0) return const _NarrativeCard();
+                      if (i == 1) return _SummaryHeader(insights: ranked);
+                      if (i == 2) return const _ComingUpPanel();
+                      if (i == 3) return const _Heatmap();
+                      final idx = i - 4;
                       final insight = ranked[idx];
                       return _AnimatedReveal(
                         delayMs: 40 * idx,
@@ -94,35 +103,138 @@ class InsightsScreen extends ConsumerWidget {
 
 // ---- Ranking ----------------------------------------------------------------
 
-/// Sort insights by an impact score so the loudest one is on top. Cost beats
-/// chain beats pattern beats improvement at the same evidence count; within
-/// the same kind, more evidence wins. Stable for ties.
-List<Insight> _rankByImpact(List<Insight> insights) {
+/// Sort insights by an impact score so the loudest one is on top. Kind sets
+/// the broad band (cost > chain > pattern > improvement); inside a band, the
+/// score is evidence count × mean severity, so 3 catastrophic entries can
+/// outrank 6 mild ones. Stable for ties.
+List<Insight> _rankByImpact(
+  List<Insight> insights,
+  Map<int, int> severityById,
+) {
   int kindWeight(InsightKind k) {
     switch (k) {
       case InsightKind.cost:
-        return 4;
+        return 40;
       case InsightKind.chain:
-        return 3;
+        return 30;
       case InsightKind.pattern:
-        return 2;
+        return 20;
       case InsightKind.improvement:
-        return 1;
+        return 10;
     }
+  }
+
+  double scoreOf(Insight i) {
+    final ids = i.evidenceIds;
+    double meanSeverity = 3;
+    if (ids.isNotEmpty) {
+      var sum = 0;
+      var n = 0;
+      for (final id in ids) {
+        final s = severityById[id];
+        if (s != null) {
+          sum += s;
+          n++;
+        }
+      }
+      if (n > 0) meanSeverity = sum / n;
+    }
+    return kindWeight(i.kind) + ids.length * meanSeverity;
   }
 
   final indexed = [
     for (var i = 0; i < insights.length; i++) (i, insights[i])
   ];
   indexed.sort((a, b) {
-    final ax = a.$2;
-    final bx = b.$2;
-    final score = (kindWeight(bx.kind) * 10 + bx.evidenceIds.length)
-        .compareTo(kindWeight(ax.kind) * 10 + ax.evidenceIds.length);
-    if (score != 0) return score;
+    final cmp = scoreOf(b.$2).compareTo(scoreOf(a.$2));
+    if (cmp != 0) return cmp;
     return a.$1.compareTo(b.$1);
   });
   return [for (final t in indexed) t.$2];
+}
+
+// ---- Narrative card ---------------------------------------------------------
+
+class _NarrativeCard extends ConsumerWidget {
+  const _NarrativeCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final narrativeAsync = ref.watch(narrativeProvider);
+    final scheme = Theme.of(context).colorScheme;
+
+    return narrativeAsync.maybeWhen(
+      data: (narrative) {
+        if (narrative == null) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  scheme.primary,
+                  scheme.primary.withValues(alpha: 0.78),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(22),
+              boxShadow: [
+                BoxShadow(
+                  color: scheme.primary.withValues(alpha: 0.22),
+                  blurRadius: 18,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.22),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: const Text(
+                        'THIS WEEK',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 10,
+                          letterSpacing: 1.0,
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    Icon(
+                      Icons.auto_awesome_rounded,
+                      color: Colors.white.withValues(alpha: 0.85),
+                      size: 18,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  narrative,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: Colors.white,
+                        height: 1.4,
+                        fontWeight: FontWeight.w500,
+                      ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+      orElse: () => const SizedBox.shrink(),
+    );
+  }
 }
 
 // ---- Summary header ---------------------------------------------------------
@@ -927,6 +1039,21 @@ class _SuggestionBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // RAG-borrowed suggestions arrive from the engine prefixed with
+    // `From "<what>": <solution>` — strip the prefix and tag the block
+    // differently so the user can tell when it's a borrow.
+    final isBorrowed = suggestion.startsWith('From "');
+    final body = isBorrowed
+        ? suggestion.replaceFirst(RegExp(r'^From "[^"]*":\s*'), '')
+        : suggestion;
+    final borrowedFrom = isBorrowed
+        ? RegExp(r'^From "([^"]*)":').firstMatch(suggestion)?.group(1)
+        : null;
+    final label = isBorrowed ? 'FROM A SIMILAR ENTRY' : 'TRY';
+    final icon = isBorrowed
+        ? Icons.auto_awesome_rounded
+        : Icons.tips_and_updates_outlined;
+
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
       decoration: BoxDecoration(
@@ -937,15 +1064,14 @@ class _SuggestionBlock extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.tips_and_updates_outlined,
-              size: 18, color: palette.accent),
+          Icon(icon, size: 18, color: palette.accent),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'TRY',
+                  label,
                   style: TextStyle(
                     color: palette.accent,
                     fontWeight: FontWeight.w700,
@@ -955,12 +1081,22 @@ class _SuggestionBlock extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  suggestion,
+                  body,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: Theme.of(context).colorScheme.onSurface,
                         fontWeight: FontWeight.w500,
                       ),
                 ),
+                if (borrowedFrom != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'matched against "$borrowedFrom"',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          fontStyle: FontStyle.italic,
+                        ),
+                  ),
+                ],
               ],
             ),
           ),
