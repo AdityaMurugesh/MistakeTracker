@@ -31,44 +31,75 @@ final suggestionEngineProvider = Provider<SuggestionEngine>((ref) {
 /// place when it does.
 // TODO(insights): replace with `entriesStreamProvider` once Capture lands it.
 final entriesProvider = Provider<List<Entry>>((ref) {
-  final now = DateTime.now();
+  // Build entries relative to "now" so the lookback window keeps catching them
+  // as time moves on.
+  DateTime atRecentWeekday(int weekday, int hour, {int weeksAgo = 0}) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day, hour);
+    final delta = (today.weekday - weekday + 7) % 7;
+    return today.subtract(Duration(days: delta + 7 * weeksAgo));
+  }
+
+  const monday = 1;
+  const friday = 5;
+
   Entry mk({
     required int id,
     required String what,
     String? cause,
     String? solution,
-    required int daysAgo,
-    int hour = 9,
+    required DateTime occurredAt,
     int? costMinutes,
     int? costMoney,
   }) {
-    final t = DateTime(now.year, now.month, now.day, hour)
-        .subtract(Duration(days: daysAgo));
     return Entry(
       id: id,
       what: what,
       cause: cause,
       solution: solution,
-      occurredAt: t,
+      occurredAt: occurredAt,
       costMinutes: costMinutes,
       costMoney: costMoney,
-      createdAt: t,
+      createdAt: occurredAt,
     );
   }
 
-  return [
-    mk(id: 1, what: 'missed workout', cause: 'tired', daysAgo: 2, hour: 7,
-        solution: 'lay out gear the night before'),
-    mk(id: 2, what: 'missed workout', cause: 'tired', daysAgo: 9, hour: 7),
-    mk(id: 3, what: 'missed workout', cause: 'tired', daysAgo: 16, hour: 7),
-    mk(id: 4, what: 'impulse purchase', cause: 'bored', daysAgo: 3,
-        costMoney: 800),
-    mk(id: 5, what: 'impulse purchase', cause: 'bored', daysAgo: 11,
-        costMoney: 1200),
-    mk(id: 6, what: 'impulse purchase', cause: 'bored', daysAgo: 20,
-        costMoney: 400),
-    mk(id: 7, what: 'skipped breakfast', daysAgo: 1, hour: 9, costMinutes: 20),
-  ];
+  final entries = <Entry>[];
+
+  // Missed workouts: Mondays 7am, last 3 weeks. Triggers recurring-cause
+  // ("tired"), weekday pattern (Monday), and hour pattern (7 AM).
+  for (var w = 0; w < 3; w++) {
+    entries.add(mk(
+      id: entries.length + 1,
+      what: 'missed workout',
+      cause: 'tired',
+      occurredAt: atRecentWeekday(monday, 7, weeksAgo: w),
+      solution: w == 0 ? 'lay out gear the night before' : null,
+    ));
+  }
+
+  // Impulse purchases: Fridays 9pm, last 3 weeks. Triggers recurring-cause
+  // ("bored"), weekday pattern (Friday), hour pattern (9 PM), and cost.
+  const purchaseCosts = [800, 1200, 400];
+  for (var w = 0; w < 3; w++) {
+    entries.add(mk(
+      id: entries.length + 1,
+      what: 'impulse purchase',
+      cause: 'bored',
+      occurredAt: atRecentWeekday(friday, 21, weeksAgo: w),
+      costMoney: purchaseCosts[w],
+    ));
+  }
+
+  // One-off so the cost insight aggregates from more than one `what`.
+  entries.add(mk(
+    id: entries.length + 1,
+    what: 'skipped breakfast',
+    occurredAt: DateTime.now().subtract(const Duration(days: 1)),
+    costMinutes: 20,
+  ));
+
+  return entries;
 });
 
 /// Insights for the current set of entries.
