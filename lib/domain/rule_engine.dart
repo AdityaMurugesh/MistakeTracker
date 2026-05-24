@@ -37,8 +37,9 @@ class RuleEngine implements SuggestionEngine {
         .toList(growable: false);
 
     insights.addAll(_recurringCause(inWindow));
+    insights.addAll(_weekdayPattern(inWindow));
+    insights.addAll(_hourPattern(inWindow));
     insights.addAll(_costInsight(inWindow));
-    // TODO: rule 2 — time-of-day pattern
     // TODO: rule 3 — chain detection
     // TODO: improvement trend insight
 
@@ -52,41 +53,88 @@ class RuleEngine implements SuggestionEngine {
   Iterable<Insight> _recurringCause(List<Entry> entries) sync* {
     final byCause = <String, List<Entry>>{};
     for (final e in entries) {
-      final key = _normalizeCause(e.cause);
+      final key = _normalize(e.cause);
       if (key == null) continue;
       (byCause[key] ??= []).add(e);
     }
 
-    // Stable output: iterate causes in descending count, then alphabetical.
-    final causes = byCause.keys.toList()
-      ..sort((a, b) {
-        final ca = byCause[a]!.length;
-        final cb = byCause[b]!.length;
-        if (cb != ca) return cb.compareTo(ca);
-        return a.compareTo(b);
-      });
-
+    final causes = _sortKeysByCountDesc(byCause);
     for (final cause in causes) {
       final group = byCause[cause]!;
       if (group.length < minOccurrencesForPattern) continue;
 
       group.sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
 
-      final displayCause = group.first.cause!.trim();
-      final evidenceIds = <int>[
-        for (final e in group)
-          if (e.id != null) e.id!,
-      ];
+      yield Insight(
+        kind: InsightKind.pattern,
+        title: '"${group.first.cause!.trim()}" keeps coming up',
+        body:
+            '${group.length} entries in the last $lookbackDays days share this cause.',
+        evidenceIds: _idsOf(group),
+        suggestion: _firstSolution(group),
+      );
+    }
+  }
 
-      final suggestion = _firstSolution(group);
+  // Rule 2a: weekday pattern.
+  // For each (normalized what, weekday) pair, emit a pattern Insight when
+  // count >= threshold. E.g. "'missed workout' on Mondays — 3 in the last 30d".
+  Iterable<Insight> _weekdayPattern(List<Entry> entries) sync* {
+    final groups = <String, List<Entry>>{};
+    for (final e in entries) {
+      final what = _normalize(e.what);
+      if (what == null) continue;
+      final wd = e.occurredAt.toLocal().weekday;
+      (groups['$what|$wd'] ??= []).add(e);
+    }
+
+    for (final key in _sortKeysByCountDesc(groups)) {
+      final group = groups[key]!;
+      if (group.length < minOccurrencesForPattern) continue;
+
+      group.sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
+      final displayWhat = group.first.what.trim();
+      final wdName = _weekdayName(group.first.occurredAt.toLocal().weekday);
 
       yield Insight(
         kind: InsightKind.pattern,
-        title: '"$displayCause" keeps coming up',
+        title: '"$displayWhat" tends to happen on ${wdName}s',
         body:
-            '${group.length} entries in the last $lookbackDays days share this cause.',
-        evidenceIds: evidenceIds,
-        suggestion: suggestion,
+            '${group.length} of these landed on a $wdName in the last $lookbackDays days.',
+        evidenceIds: _idsOf(group),
+        suggestion: _firstSolution(group),
+      );
+    }
+  }
+
+  // Rule 2b: hour-of-day pattern.
+  // For each (normalized what, local hour) pair, emit a pattern Insight when
+  // count >= threshold.
+  Iterable<Insight> _hourPattern(List<Entry> entries) sync* {
+    final groups = <String, List<Entry>>{};
+    for (final e in entries) {
+      final what = _normalize(e.what);
+      if (what == null) continue;
+      final hour = e.occurredAt.toLocal().hour;
+      (groups['$what|$hour'] ??= []).add(e);
+    }
+
+    for (final key in _sortKeysByCountDesc(groups)) {
+      final group = groups[key]!;
+      if (group.length < minOccurrencesForPattern) continue;
+
+      group.sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
+      final displayWhat = group.first.what.trim();
+      final hourLabel =
+          _formatHour(group.first.occurredAt.toLocal().hour);
+
+      yield Insight(
+        kind: InsightKind.pattern,
+        title: '"$displayWhat" tends to happen around $hourLabel',
+        body:
+            '${group.length} of these happened around $hourLabel in the last $lookbackDays days.',
+        evidenceIds: _idsOf(group),
+        suggestion: _firstSolution(group),
       );
     }
   }
@@ -118,11 +166,16 @@ class RuleEngine implements SuggestionEngine {
     );
   }
 
-  String? _normalizeCause(String? cause) {
-    if (cause == null) return null;
-    final trimmed = cause.trim().toLowerCase();
-    return trimmed.isEmpty ? null : trimmed;
+  // --- helpers ---
+
+  String? _normalize(String? s) {
+    if (s == null) return null;
+    final t = s.trim().toLowerCase();
+    return t.isEmpty ? null : t;
   }
+
+  List<int> _idsOf(List<Entry> entries) =>
+      [for (final e in entries) if (e.id != null) e.id!];
 
   String? _firstSolution(List<Entry> entriesNewestFirst) {
     for (final e in entriesNewestFirst) {
@@ -130,5 +183,35 @@ class RuleEngine implements SuggestionEngine {
       if (s != null && s.isNotEmpty) return s;
     }
     return null;
+  }
+
+  // Stable ordering: descending count, then alphabetical key.
+  List<String> _sortKeysByCountDesc(Map<String, List<Entry>> groups) {
+    final keys = groups.keys.toList();
+    keys.sort((a, b) {
+      final cmp = groups[b]!.length.compareTo(groups[a]!.length);
+      return cmp != 0 ? cmp : a.compareTo(b);
+    });
+    return keys;
+  }
+
+  String _weekdayName(int wd) {
+    const names = [
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+      'Sunday',
+    ];
+    return names[wd - 1];
+  }
+
+  String _formatHour(int hour) {
+    if (hour == 0) return '12 AM';
+    if (hour == 12) return '12 PM';
+    if (hour < 12) return '$hour AM';
+    return '${hour - 12} PM';
   }
 }
