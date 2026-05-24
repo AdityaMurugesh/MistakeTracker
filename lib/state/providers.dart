@@ -202,5 +202,31 @@ List<Entry> _demoSeedEntries() {
     costMinutes: 20,
   ));
 
+  // Chain seed: "argument with roommate" -> "couldn't sleep", 3 weeks running.
+  // Weekday/hour vary across the three pairs so this only trips the chain
+  // rule (not the weekday or hour pattern rules).
+  const chainPairs = <List<int>>[
+    [2, 20, 23], // Tue 8 PM -> Tue 11 PM
+    [3, 19, 23], // Wed 7 PM -> Wed 11 PM
+    [4, 21, 23], // Thu 9 PM -> Thu 11 PM
+  ];
+  for (var w = 0; w < chainPairs.length; w++) {
+    final p = chainPairs[w];
+    final trigger = atRecentWeekday(p[0], p[1], weeksAgo: w);
+    final consequence = atRecentWeekday(p[0], p[2], weeksAgo: w);
+    entries.add(mk(
+      id: entries.length + 1,
+      what: 'argument with roommate',
+      occurredAt: trigger,
+      solution: w == 0 ? 'walk it off before bed' : null,
+    ));
+    entries.add(mk(
+      id: entries.length + 1,
+      what: "couldn't sleep",
+      occurredAt: consequence,
+      costMinutes: 60,
+    ));
+  }
+
   return entries;
 }
