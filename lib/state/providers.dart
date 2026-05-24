@@ -1,38 +1,59 @@
-// Owner: Reach & Data (initial setup) — but every role adds their own providers here.
+// Owner: Reach & Data (initial setup) — every role adds their own providers here.
 // Riverpod providers: DI container + reactive state.
-//
-// TODO (Reach & Data Day 1 shared setup):
-//   - appDatabaseProvider     -> AppDatabase.instance
-//   - entryDaoProvider        -> EntryDao(db)
-//   - exportServiceProvider   -> ExportService(dao)
-//   - notifierProvider        -> Notifier()
-//   - timeSignalProvider      -> TimeSignal(dao)
-//
-// Reactive providers each role adds:
-//   - entriesStreamProvider   (Capture)
-//   - suggestionEngineProvider (Insights — below)
-//   - insightsProvider        (Insights — below, recomputed when entries change)
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../data/database.dart';
+import '../data/entry_dao.dart';
 import '../domain/models/entry.dart';
 import '../domain/models/insight.dart';
 import '../domain/rule_engine.dart';
 import '../domain/suggestion_engine.dart';
 
-// --- Insights providers ---
+// ---- Capture ----------------------------------------------------------------
+
+final appDatabaseProvider = Provider<AppDatabase>((_) => AppDatabase.instance);
+
+final entryDaoProvider = Provider<EntryDao>((ref) {
+  final appDb = ref.watch(appDatabaseProvider);
+  final dao = EntryDao(appDb.db);
+  ref.onDispose(dao.dispose);
+  return dao;
+});
+
+/// Reactive list of entries the user has logged.
+///
+/// On native (Android/iOS/desktop) this watches the real sqflite-backed DAO.
+/// On web, sqflite has no implementation, so we fall back to a stable seed
+/// of demo entries so the Insights screen still renders something for a
+/// browser-based preview.
+final entriesStreamProvider = StreamProvider<List<Entry>>((ref) {
+  if (kIsWeb) {
+    return Stream.value(_demoSeedEntries());
+  }
+  return ref.watch(entryDaoProvider).watchAll();
+});
+
+// ---- Insights ---------------------------------------------------------------
 
 final suggestionEngineProvider = Provider<SuggestionEngine>((ref) {
   return RuleEngine();
 });
 
-/// Temporary entries source so Insights can render REAL engine output before
-/// Capture's `entriesStreamProvider` lands. Swap to the real provider in one
-/// place when it does.
-// TODO(insights): replace with `entriesStreamProvider` once Capture lands it.
-final entriesProvider = Provider<List<Entry>>((ref) {
-  // Build entries relative to "now" so the lookback window keeps catching them
-  // as time moves on.
+/// Insights derived from the current entries via the rule engine.
+final insightsProvider = FutureProvider<List<Insight>>((ref) async {
+  final entries = await ref.watch(entriesStreamProvider.future);
+  final engine = ref.read(suggestionEngineProvider);
+  return engine.analyze(entries);
+});
+
+// ---- Reach & Data -----------------------------------------------------------
+// (exportServiceProvider, notifierProvider, timeSignalProvider go here)
+
+// ---- Demo seed (web-only fallback) ------------------------------------------
+
+List<Entry> _demoSeedEntries() {
   DateTime atRecentWeekday(int weekday, int hour, {int weeksAgo = 0}) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day, hour);
@@ -100,11 +121,4 @@ final entriesProvider = Provider<List<Entry>>((ref) {
   ));
 
   return entries;
-});
-
-/// Insights for the current set of entries.
-final insightsProvider = FutureProvider<List<Insight>>((ref) async {
-  final entries = ref.watch(entriesProvider);
-  final engine = ref.read(suggestionEngineProvider);
-  return engine.analyze(entries);
-});
+}
