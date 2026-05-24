@@ -1,11 +1,17 @@
 // Owner: Insights
 // v1 implementation of SuggestionEngine. Pure Dart, no DB access.
 //
-// Three rule families to implement:
-//   1. Recurring cause   — group by `cause`, surface causes appearing in >=3 entries
-//   2. Time-of-day pattern — group by (what, day_of_week) or (what, hour); flag >=3 in 30d
-//   3. Chain detection   — for each entry, look at next entry within N hours;
-//                          surface (A -> B) pairs that appear >=3 times
+// Rule families:
+//   1. Recurring cause       — same cause appearing >=3 times in window
+//   2. Time-of-day pattern   — (what, weekday) and (what, hour) buckets >=3
+//   3. Chain detection       — (A.what -> B.what) within 6h, >=3 times
+//   4. Cross-cause chain     — (a.cause -> b.what) within 24h, >=3 times
+//   5. Cost aggregation      — sum costMinutes / costMoney + yearly projection
+//   6. Streak / improvement  — `what` quiet for notably longer than usual
+//
+// Forecasts (forward-looking projections) live in a separate method,
+// RuleEngine.forecast(entries), since they don't fit the SuggestionEngine
+// contract.
 //
 // Plus: suggestion text = user's own past `solution` for the same `what`, if any.
 //
@@ -13,6 +19,7 @@
 
 import 'suggestion_engine.dart';
 import 'models/entry.dart';
+import 'models/forecast.dart';
 import 'models/insight.dart';
 
 class RuleEngine implements SuggestionEngine {
@@ -20,6 +27,9 @@ class RuleEngine implements SuggestionEngine {
   static const int minOccurrencesForPattern = 3;
   static const int lookbackDays = 30;
   static const int chainWindowHours = 6;
+  static const int crossCauseWindowHours = 24;
+  static const int streakLookbackDays = 60;
+  static const int streakMinDaysSince = 7;
 
   /// Injected "now" for tests; defaults to DateTime.now().
   final DateTime Function() _now;
@@ -40,9 +50,47 @@ class RuleEngine implements SuggestionEngine {
     insights.addAll(_weekdayPattern(inWindow));
     insights.addAll(_hourPattern(inWindow));
     insights.addAll(_chainDetection(inWindow));
+    insights.addAll(_crossCauseChain(inWindow));
     insights.addAll(_costInsight(inWindow));
+    insights.addAll(_streakInsight(entries)); // uses extended window
 
     return insights;
+  }
+
+  /// Forward-looking: projects the next likely occurrence of each strong
+  /// (what, weekday, hour) pattern. Returned sorted by soonest first.
+  List<Forecast> forecast(List<Entry> entries) {
+    final now = _now();
+    final windowStart = now.subtract(const Duration(days: lookbackDays));
+    final inWindow = entries
+        .where((e) => !e.occurredAt.isBefore(windowStart))
+        .toList(growable: false);
+
+    final triples = <String, List<Entry>>{};
+    for (final e in inWindow) {
+      final what = _normalize(e.what);
+      if (what == null) continue;
+      final local = e.occurredAt.toLocal();
+      (triples['$what|${local.weekday}|${local.hour}'] ??= []).add(e);
+    }
+
+    final out = <Forecast>[];
+    for (final group in triples.values) {
+      if (group.length < minOccurrencesForPattern) continue;
+      final last = group.last;
+      final local = last.occurredAt.toLocal();
+      final next = _nextLocalOccurrence(now.toLocal(), local.weekday, local.hour);
+      out.add(Forecast(
+        kind: ForecastKind.weekdayHour,
+        what: last.what.trim(),
+        nextAt: next.toUtc(),
+        basis: group.length,
+        basisLabel:
+            '${_weekdayName(local.weekday)}s at ${_formatHour(local.hour)}',
+      ));
+    }
+    out.sort((a, b) => a.nextAt.compareTo(b.nextAt));
+    return out;
   }
 
   // Rule 1: recurring cause.
@@ -196,7 +244,59 @@ class RuleEngine implements SuggestionEngine {
     }
   }
 
-  // Cost insight: sum costMinutes and costMoney within the lookback window.
+  // Rule 4: cross-cause chain.
+  // For each entry A with a non-empty cause, look at the immediately next
+  // chronological entry B. If B falls within crossCauseWindowHours and has
+  // a different `what` than A, count (A.cause -> B.what) and surface pairs
+  // with >= threshold occurrences. Different from rule 3: it correlates the
+  // *trigger reason* (cause) with the next failure (what), not what with what.
+  Iterable<Insight> _crossCauseChain(List<Entry> entries) sync* {
+    if (entries.length < 2) return;
+    final sorted = [...entries]
+      ..sort((a, b) => a.occurredAt.compareTo(b.occurredAt));
+    const window = Duration(hours: crossCauseWindowHours);
+
+    final pairs = <String, List<List<Entry>>>{};
+    for (var i = 0; i < sorted.length - 1; i++) {
+      final a = sorted[i];
+      final b = sorted[i + 1];
+      if (b.occurredAt.difference(a.occurredAt) > window) continue;
+      final aCause = _normalize(a.cause);
+      final aWhat = _normalize(a.what);
+      final bWhat = _normalize(b.what);
+      if (aCause == null || aWhat == null || bWhat == null) continue;
+      if (aWhat == bWhat) continue; // already covered by recurring rules
+      (pairs['$aCause||$bWhat'] ??= []).add([a, b]);
+    }
+
+    for (final key in _sortKeysByCountDesc(pairs)) {
+      final occurrences = pairs[key]!;
+      if (occurrences.length < minOccurrencesForPattern) continue;
+
+      final causeDisplay = occurrences.first[0].cause!.trim();
+      final whatDisplay = occurrences.first[1].what.trim();
+
+      final idSet = <int>{};
+      for (final pair in occurrences) {
+        for (final e in pair) {
+          if (e.id != null) idSet.add(e.id!);
+        }
+      }
+
+      yield Insight(
+        kind: InsightKind.chain,
+        title:
+            'When the cause is "$causeDisplay", "$whatDisplay" often follows',
+        body:
+            '${occurrences.length} times in the last $lookbackDays days, '
+            'within $crossCauseWindowHours hours.',
+        evidenceIds: idSet.toList()..sort(),
+      );
+    }
+  }
+
+  // Cost insight: sum costMinutes and costMoney within the lookback window,
+  // plus a yearly projection extrapolated linearly from the 30-day rate.
   Iterable<Insight> _costInsight(List<Entry> entries) sync* {
     var minutes = 0;
     var money = 0;
@@ -215,12 +315,72 @@ class RuleEngine implements SuggestionEngine {
     if (money > 0) parts.add('about $money in money');
     if (minutes > 0) parts.add('$minutes minutes of your time');
 
+    final projParts = <String>[];
+    if (money > 0) {
+      final perYear = (money / lookbackDays * 365).round();
+      projParts.add('\$$perYear');
+    }
+    if (minutes > 0) {
+      final yearMinutes = (minutes / lookbackDays * 365).round();
+      final yearHours = (yearMinutes / 60).round();
+      projParts.add('$yearHours hours');
+    }
+    final projection = projParts.join(' and ');
+
     yield Insight(
       kind: InsightKind.cost,
       title: 'Cost of failures, last $lookbackDays days',
-      body: 'These entries cost ${parts.join(' and ')}.',
+      body: 'These entries cost ${parts.join(' and ')}. At this rate, '
+          "that's roughly $projection over a year.",
       evidenceIds: ids,
     );
+  }
+
+  // Streak / improvement insight.
+  // For each `what` with >= 3 entries in the extended (60d) window, compute
+  // days since the most recent occurrence and the average gap between
+  // entries. If the user has gone notably longer than usual (>= 7 days and
+  // >= 2x the average gap), surface that as an improvement.
+  Iterable<Insight> _streakInsight(List<Entry> entries) sync* {
+    final now = _now();
+    final start = now.subtract(const Duration(days: streakLookbackDays));
+    final filtered = entries.where((e) => !e.occurredAt.isBefore(start)).toList();
+
+    final byWhat = <String, List<Entry>>{};
+    for (final e in filtered) {
+      final w = _normalize(e.what);
+      if (w == null) continue;
+      (byWhat[w] ??= []).add(e);
+    }
+
+    for (final group in byWhat.values) {
+      if (group.length < minOccurrencesForPattern) continue;
+      group.sort((a, b) => a.occurredAt.compareTo(b.occurredAt));
+
+      final last = group.last.occurredAt;
+      final daysSince = now.difference(last).inDays;
+      if (daysSince < streakMinDaysSince) continue;
+
+      var gapSum = 0;
+      for (var i = 1; i < group.length; i++) {
+        gapSum += group[i].occurredAt.difference(group[i - 1].occurredAt).inDays;
+      }
+      final avgGap = gapSum / (group.length - 1);
+      if (avgGap > 0 && daysSince < avgGap * 2) continue;
+
+      final displayWhat = group.last.what.trim();
+      final avgGapText = avgGap >= 1
+          ? '${avgGap.toStringAsFixed(0)} day${avgGap >= 2 ? 's' : ''}'
+          : 'under a day';
+
+      yield Insight(
+        kind: InsightKind.improvement,
+        title: '$daysSince days since "$displayWhat"',
+        body:
+            'Your usual gap is about $avgGapText. Whatever you changed is working.',
+        evidenceIds: _idsOf(group),
+      );
+    }
   }
 
   // --- helpers ---
@@ -270,5 +430,14 @@ class RuleEngine implements SuggestionEngine {
     if (hour == 12) return '12 PM';
     if (hour < 12) return '$hour AM';
     return '${hour - 12} PM';
+  }
+
+  /// Next local DateTime strictly after `fromLocal` whose weekday + hour match.
+  DateTime _nextLocalOccurrence(DateTime fromLocal, int weekday, int hour) {
+    var d = DateTime(fromLocal.year, fromLocal.month, fromLocal.day, hour);
+    while (d.weekday != weekday || !d.isAfter(fromLocal)) {
+      d = d.add(const Duration(days: 1));
+    }
+    return d;
   }
 }

@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/database.dart';
 import '../data/entry_dao.dart';
 import '../domain/models/entry.dart';
+import '../domain/models/forecast.dart';
 import '../domain/models/insight.dart';
 import '../domain/rule_engine.dart';
 import '../domain/suggestion_engine.dart';
@@ -42,11 +43,25 @@ final suggestionEngineProvider = Provider<SuggestionEngine>((ref) {
   return RuleEngine();
 });
 
+/// Concrete RuleEngine for features beyond the SuggestionEngine contract
+/// (e.g. forward-looking forecasts).
+final ruleEngineProvider = Provider<RuleEngine>((ref) {
+  final engine = ref.watch(suggestionEngineProvider);
+  return engine as RuleEngine;
+});
+
 /// Insights derived from the current entries via the rule engine.
 final insightsProvider = FutureProvider<List<Insight>>((ref) async {
   final entries = await ref.watch(entriesStreamProvider.future);
   final engine = ref.read(suggestionEngineProvider);
   return engine.analyze(entries);
+});
+
+/// Forward-looking projections from the rule engine. Sorted soonest-first.
+final forecastsProvider = FutureProvider<List<Forecast>>((ref) async {
+  final entries = await ref.watch(entriesStreamProvider.future);
+  final engine = ref.read(ruleEngineProvider);
+  return engine.forecast(entries);
 });
 
 // ---- Reach & Data -----------------------------------------------------------

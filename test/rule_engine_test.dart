@@ -3,6 +3,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mistake_tracker/domain/models/entry.dart';
+import 'package:mistake_tracker/domain/models/forecast.dart';
 import 'package:mistake_tracker/domain/models/insight.dart';
 import 'package:mistake_tracker/domain/rule_engine.dart';
 
@@ -417,6 +418,206 @@ void main() {
         mk(id: 1, what: 'x', costMoney: 999, daysAgo: 45),
       ]);
       expect(insights.where((i) => i.kind == InsightKind.cost), isEmpty);
+    });
+
+    test('body includes a yearly projection', () async {
+      // $300 / 30d = $10/day => ~$3650/year.
+      // 45min / 30d = 1.5min/day => ~547min/year => ~9 hours.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'x', costMinutes: 30, costMoney: 100, daysAgo: 1),
+        mk(id: 2, what: 'y', costMinutes: 15, costMoney: 200, daysAgo: 5),
+      ]);
+      final cost = insights.firstWhere((i) => i.kind == InsightKind.cost);
+      expect(cost.body.toLowerCase(), contains('rate'));
+      expect(cost.body, contains('3650'));
+      expect(cost.body, contains('9 hours'));
+    });
+  });
+
+  group('RuleEngine — cross-cause correlation', () {
+    // (cause: stressed) -> (what: impulse purchase) within 24h, 3 weeks running.
+    test('3 occurrences of (cause -> what) within 24h fire a chain insight',
+        () async {
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'argument', cause: 'stressed',
+            occurredAt: DateTime(2026, 5, 19, 18)),
+        mk(id: 2, what: 'impulse purchase',
+            occurredAt: DateTime(2026, 5, 20, 8)),
+        mk(id: 3, what: 'argument', cause: 'stressed',
+            occurredAt: DateTime(2026, 5, 20, 18)),
+        mk(id: 4, what: 'impulse purchase',
+            occurredAt: DateTime(2026, 5, 21, 8)),
+        mk(id: 5, what: 'argument', cause: 'stressed',
+            occurredAt: DateTime(2026, 5, 21, 18)),
+        mk(id: 6, what: 'impulse purchase',
+            occurredAt: DateTime(2026, 5, 22, 8)),
+      ]);
+      final cross = insights.where((i) =>
+          i.kind == InsightKind.chain &&
+          i.title.toLowerCase().contains('when the cause is')).toList();
+      expect(cross, hasLength(1));
+      expect(cross.first.title.toLowerCase(), contains('stressed'));
+      expect(cross.first.title.toLowerCase(), contains('impulse purchase'));
+      expect(cross.first.evidenceIds, unorderedEquals([1, 2, 3, 4, 5, 6]));
+    });
+
+    test('gap larger than 24h breaks the cross-cause correlation', () async {
+      // 30h between trigger and consequence.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'argument', cause: 'stressed',
+            occurredAt: DateTime(2026, 5, 18, 8)),
+        mk(id: 2, what: 'impulse purchase',
+            occurredAt: DateTime(2026, 5, 19, 14)),
+        mk(id: 3, what: 'argument', cause: 'stressed',
+            occurredAt: DateTime(2026, 5, 19, 8)),
+        mk(id: 4, what: 'impulse purchase',
+            occurredAt: DateTime(2026, 5, 20, 14)),
+        mk(id: 5, what: 'argument', cause: 'stressed',
+            occurredAt: DateTime(2026, 5, 20, 8)),
+        mk(id: 6, what: 'impulse purchase',
+            occurredAt: DateTime(2026, 5, 21, 14)),
+      ]);
+      expect(
+          insights.where(
+              (i) => i.title.toLowerCase().contains('when the cause is')),
+          isEmpty);
+    });
+
+    test('cross-cause requires a non-null cause on the trigger', () async {
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'argument', cause: null,
+            occurredAt: DateTime(2026, 5, 19, 18)),
+        mk(id: 2, what: 'impulse purchase',
+            occurredAt: DateTime(2026, 5, 20, 8)),
+        mk(id: 3, what: 'argument', cause: null,
+            occurredAt: DateTime(2026, 5, 20, 18)),
+        mk(id: 4, what: 'impulse purchase',
+            occurredAt: DateTime(2026, 5, 21, 8)),
+        mk(id: 5, what: 'argument', cause: null,
+            occurredAt: DateTime(2026, 5, 21, 18)),
+        mk(id: 6, what: 'impulse purchase',
+            occurredAt: DateTime(2026, 5, 22, 8)),
+      ]);
+      expect(
+          insights.where(
+              (i) => i.title.toLowerCase().contains('when the cause is')),
+          isEmpty);
+    });
+  });
+
+  group('RuleEngine — streak / improvement', () {
+    test('long quiet stretch after a recurring `what` emits improvement',
+        () async {
+      // 5 entries spaced ~3 days apart, last one 14 days ago. Avg gap ~3d,
+      // daysSince=14 > 7 (min) and > 2*3=6 → improvement should fire.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'snooze alarm', daysAgo: 26),
+        mk(id: 2, what: 'snooze alarm', daysAgo: 23),
+        mk(id: 3, what: 'snooze alarm', daysAgo: 20),
+        mk(id: 4, what: 'snooze alarm', daysAgo: 17),
+        mk(id: 5, what: 'snooze alarm', daysAgo: 14),
+      ]);
+      final imp = insights
+          .where((i) => i.kind == InsightKind.improvement)
+          .toList();
+      expect(imp, hasLength(1));
+      expect(imp.first.title, contains('14'));
+      expect(imp.first.title.toLowerCase(), contains('snooze alarm'));
+    });
+
+    test('still-frequent `what` does not emit improvement', () async {
+      // 5 entries with last one 2 days ago. daysSince < 7 → no streak.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'x', daysAgo: 14),
+        mk(id: 2, what: 'x', daysAgo: 11),
+        mk(id: 3, what: 'x', daysAgo: 8),
+        mk(id: 4, what: 'x', daysAgo: 5),
+        mk(id: 5, what: 'x', daysAgo: 2),
+      ]);
+      expect(
+          insights.where((i) => i.kind == InsightKind.improvement), isEmpty);
+    });
+
+    test('quiet stretch <2x usual gap does not emit improvement', () async {
+      // Last 8 days ago, avg gap 6d → 8 < 12 → no streak.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'y', daysAgo: 26),
+        mk(id: 2, what: 'y', daysAgo: 20),
+        mk(id: 3, what: 'y', daysAgo: 14),
+        mk(id: 4, what: 'y', daysAgo: 8),
+      ]);
+      expect(
+          insights.where((i) => i.kind == InsightKind.improvement), isEmpty);
+    });
+
+    test('streak rule sees beyond the 30d analyze window', () async {
+      // All entries 40-50 days ago, last one 35 days ago. Should still emit
+      // since streak uses the extended 60d window.
+      final insights = await engine().analyze([
+        mk(id: 1, what: 'old habit', daysAgo: 55),
+        mk(id: 2, what: 'old habit', daysAgo: 50),
+        mk(id: 3, what: 'old habit', daysAgo: 45),
+        mk(id: 4, what: 'old habit', daysAgo: 40),
+      ]);
+      expect(
+          insights.where((i) => i.kind == InsightKind.improvement),
+          hasLength(1));
+    });
+  });
+
+  group('RuleEngine — forecast', () {
+    test('returns a forecast per strong (what, weekday, hour) triple',
+        () async {
+      // 3 Mondays at 7 AM, all in the 30d window. Within UTC+4 (Asia/Dubai),
+      // these local datetimes are Mondays too, so the forecast triple groups.
+      final forecasts = engine().forecast([
+        mk(id: 1, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 4, 7)),
+        mk(id: 2, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 11, 7)),
+        mk(id: 3, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 18, 7)),
+      ]);
+      expect(forecasts, isNotEmpty);
+      final f = forecasts.first;
+      expect(f.kind, ForecastKind.weekdayHour);
+      expect(f.what.toLowerCase(), contains('missed workout'));
+      expect(f.basis, 3);
+      // nextAt must be strictly in the future relative to fixedNow.
+      expect(f.nextAt.isAfter(fixedNow), isTrue);
+    });
+
+    test('weak (<3) triples are dropped', () async {
+      final forecasts = engine().forecast([
+        mk(id: 1, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 4, 7)),
+        mk(id: 2, what: 'missed workout',
+            occurredAt: DateTime(2026, 5, 11, 7)),
+      ]);
+      expect(forecasts, isEmpty);
+    });
+
+    test('forecasts are sorted soonest first', () async {
+      // Two strong triples: Mondays 7 AM and Tuesdays 9 PM. From fixedNow
+      // (Sun May 24), the next Monday 7 AM (~next day) comes before the
+      // next Tuesday 9 PM.
+      final forecasts = engine().forecast([
+        mk(id: 1, what: 'mon thing',
+            occurredAt: DateTime(2026, 5, 4, 7)),
+        mk(id: 2, what: 'mon thing',
+            occurredAt: DateTime(2026, 5, 11, 7)),
+        mk(id: 3, what: 'mon thing',
+            occurredAt: DateTime(2026, 5, 18, 7)),
+        mk(id: 4, what: 'tue thing',
+            occurredAt: DateTime(2026, 5, 5, 21)),
+        mk(id: 5, what: 'tue thing',
+            occurredAt: DateTime(2026, 5, 12, 21)),
+        mk(id: 6, what: 'tue thing',
+            occurredAt: DateTime(2026, 5, 19, 21)),
+      ]);
+      expect(forecasts, hasLength(2));
+      expect(
+          forecasts.first.nextAt.isBefore(forecasts.last.nextAt), isTrue);
     });
   });
 }
