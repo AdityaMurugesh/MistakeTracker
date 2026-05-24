@@ -84,8 +84,8 @@ All thresholds live as constants in `rule_engine.dart` so they're tweakable in o
 | Edit / delete entries | ✓ |
 | Reactive recent-entries list with empty / loading / error states | ✓ |
 | Rule-based insights (3 families) | ✓ |
-| Settings + JSON export | _Reach & Data role_ |
-| Local notifications (time-based) | _Reach & Data role_ |
+| Settings + JSON export (`share_plus`) | ✓ |
+| Local notifications (time-of-day patterns, Android 13+ runtime permission) | ✓ |
 | Cloud sync | Deferred to v2 (swap-in point documented) |
 | LLM suggestions | Deferred to v2 (swap-in point documented) |
 | Win log | Deferred to v2 (`Entry.kind` field already in schema) |
