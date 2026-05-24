@@ -1,10 +1,14 @@
 // Owner: Insights
-// Renders the output of SuggestionEngine.analyze() as cards.
+// Renders the rule-engine output as cards, plus forward-looking forecasts,
+// a heatmap of when failures cluster, and per-card sparklines.
+
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/models/entry.dart';
+import '../domain/models/forecast.dart';
 import '../domain/models/insight.dart';
 import '../state/providers.dart';
 
@@ -14,94 +18,739 @@ class InsightsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final insightsAsync = ref.watch(insightsProvider);
+    final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Insights')),
-      body: insightsAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (err, _) => _ErrorState(message: err.toString()),
-        data: (insights) {
-          if (insights.isEmpty) return const _EmptyState();
-          return RefreshIndicator(
-            onRefresh: () async => ref.refresh(insightsProvider.future),
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              itemCount: insights.length,
-              itemBuilder: (context, i) => _InsightCard(insight: insights[i]),
-            ),
-          );
+      backgroundColor: scheme.surface,
+      body: RefreshIndicator(
+        onRefresh: () async {
+          ref.invalidate(insightsProvider);
+          ref.invalidate(forecastsProvider);
+          await ref.read(insightsProvider.future);
+          await ref.read(forecastsProvider.future);
         },
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
+            SliverAppBar.large(
+              backgroundColor: scheme.surface,
+              surfaceTintColor: scheme.surfaceTint,
+              title: Text(
+                'Insights',
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: scheme.onSurface,
+                ),
+              ),
+            ),
+            insightsAsync.when(
+              loading: () => const SliverFillRemaining(
+                hasScrollBody: false,
+                child: Center(child: CircularProgressIndicator()),
+              ),
+              error: (err, _) => SliverFillRemaining(
+                hasScrollBody: false,
+                child: _ErrorState(message: err.toString()),
+              ),
+              data: (insights) {
+                if (insights.isEmpty) {
+                  return const SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: _EmptyState(),
+                  );
+                }
+                final ranked = _rankByImpact(insights);
+                return SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+                  sliver: SliverList.builder(
+                    itemCount: ranked.length + 3,
+                    itemBuilder: (context, i) {
+                      if (i == 0) return _SummaryHeader(insights: ranked);
+                      if (i == 1) return const _ComingUpPanel();
+                      if (i == 2) return const _Heatmap();
+                      final idx = i - 3;
+                      final insight = ranked[idx];
+                      return _AnimatedReveal(
+                        delayMs: 40 * idx,
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: _InsightCard(
+                            insight: insight,
+                            isTopPriority: idx == 0,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _InsightCard extends StatelessWidget {
-  const _InsightCard({required this.insight});
-  final Insight insight;
+// ---- Ranking ----------------------------------------------------------------
+
+/// Sort insights by an impact score so the loudest one is on top. Cost beats
+/// chain beats pattern beats improvement at the same evidence count; within
+/// the same kind, more evidence wins. Stable for ties.
+List<Insight> _rankByImpact(List<Insight> insights) {
+  int kindWeight(InsightKind k) {
+    switch (k) {
+      case InsightKind.cost:
+        return 4;
+      case InsightKind.chain:
+        return 3;
+      case InsightKind.pattern:
+        return 2;
+      case InsightKind.improvement:
+        return 1;
+    }
+  }
+
+  final indexed = [
+    for (var i = 0; i < insights.length; i++) (i, insights[i])
+  ];
+  indexed.sort((a, b) {
+    final ax = a.$2;
+    final bx = b.$2;
+    final score = (kindWeight(bx.kind) * 10 + bx.evidenceIds.length)
+        .compareTo(kindWeight(ax.kind) * 10 + ax.evidenceIds.length);
+    if (score != 0) return score;
+    return a.$1.compareTo(b.$1);
+  });
+  return [for (final t in indexed) t.$2];
+}
+
+// ---- Summary header ---------------------------------------------------------
+
+class _SummaryHeader extends StatelessWidget {
+  const _SummaryHeader({required this.insights});
+  final List<Insight> insights;
 
   @override
   Widget build(BuildContext context) {
-    final palette = _paletteFor(insight.kind, Theme.of(context).brightness);
+    final scheme = Theme.of(context).colorScheme;
+    final counts = <InsightKind, int>{};
+    for (final i in insights) {
+      counts[i.kind] = (counts[i.kind] ?? 0) + 1;
+    }
+    final total = insights.length;
 
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => _showEvidenceSheet(context, insight),
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border(left: BorderSide(color: palette.accent, width: 4)),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8, top: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: '$total ',
+                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: scheme.onSurface,
+                      ),
+                ),
+                TextSpan(
+                  text: total == 1 ? 'pattern' : 'patterns',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                ),
+              ],
+            ),
           ),
-          padding: const EdgeInsets.all(16),
+          const SizedBox(height: 2),
+          Text(
+            'from the last 30 days',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final kind in _kindOrder)
+                if ((counts[kind] ?? 0) > 0)
+                  _KindChip(kind: kind, count: counts[kind]!),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  static const _kindOrder = [
+    InsightKind.pattern,
+    InsightKind.chain,
+    InsightKind.cost,
+    InsightKind.improvement,
+  ];
+}
+
+class _KindChip extends StatelessWidget {
+  const _KindChip({required this.kind, required this.count});
+  final InsightKind kind;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = _paletteFor(kind, Theme.of(context).brightness);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      decoration: BoxDecoration(
+        color: palette.tint,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: palette.accent.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(palette.icon, size: 14, color: palette.accent),
+          const SizedBox(width: 6),
+          Text(
+            '$count ${_labelFor(kind).toLowerCase()}',
+            style: TextStyle(
+              color: palette.accent,
+              fontWeight: FontWeight.w600,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---- Coming Up panel --------------------------------------------------------
+
+class _ComingUpPanel extends ConsumerWidget {
+  const _ComingUpPanel();
+
+  static const _maxShown = 3;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final forecastsAsync = ref.watch(forecastsProvider);
+    return forecastsAsync.maybeWhen(
+      data: (forecasts) {
+        if (forecasts.isEmpty) return const SizedBox.shrink();
+        final shown = forecasts.take(_maxShown).toList();
+        return Padding(
+          padding: const EdgeInsets.only(top: 16),
+          child: _ComingUpCard(forecasts: shown),
+        );
+      },
+      orElse: () => const SizedBox.shrink(),
+    );
+  }
+}
+
+class _ComingUpCard extends StatelessWidget {
+  const _ComingUpCard({required this.forecasts});
+  final List<Forecast> forecasts;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final primary = scheme.primary;
+    final containerTint = scheme.primaryContainer.withValues(alpha: 0.45);
+
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            scheme.primaryContainer,
+            containerTint,
+          ],
+        ),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: primary.withValues(alpha: 0.18)),
+        boxShadow: [
+          BoxShadow(
+            color: primary.withValues(alpha: 0.10),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: primary,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(Icons.schedule_rounded,
+                    color: Colors.white, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'COMING UP',
+                    style: TextStyle(
+                      color: primary,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 11,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                  Text(
+                    'Your next at-risk windows',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          for (var i = 0; i < forecasts.length; i++) ...[
+            _ForecastRow(forecast: forecasts[i]),
+            if (i < forecasts.length - 1)
+              Divider(
+                height: 18,
+                color: primary.withValues(alpha: 0.12),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ForecastRow extends StatelessWidget {
+  const _ForecastRow({required this.forecast});
+  final Forecast forecast;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final now = DateTime.now();
+    final localNext = forecast.nextAt.toLocal();
+    final countdown = _humanCountdown(localNext.difference(now));
+    final urgent = localNext.difference(now).inHours <= 24;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '"${forecast.what}"',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                forecast.basisLabel,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: urgent
+                ? scheme.error.withValues(alpha: 0.12)
+                : scheme.primary.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            'in $countdown',
+            style: TextStyle(
+              color: urgent ? scheme.error : scheme.primary,
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  static String _humanCountdown(Duration d) {
+    if (d.isNegative) return 'soon';
+    if (d.inMinutes < 60) return '${d.inMinutes.clamp(1, 59)}m';
+    if (d.inHours < 24) return '${d.inHours}h';
+    if (d.inDays < 14) return '${d.inDays}d';
+    return '${(d.inDays / 7).floor()}w';
+  }
+}
+
+// ---- Heatmap ----------------------------------------------------------------
+
+class _Heatmap extends ConsumerWidget {
+  const _Heatmap();
+
+  // 8 rows × 3-hour buckets starting at midnight local time.
+  static const _hourLabels = ['12a', '3a', '6a', '9a', '12p', '3p', '6p', '9p'];
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final entriesAsync = ref.watch(entriesStreamProvider);
+    return entriesAsync.maybeWhen(
+      data: (entries) {
+        if (entries.length < 5) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: 16),
+          child: _HeatmapCard(entries: entries),
+        );
+      },
+      orElse: () => const SizedBox.shrink(),
+    );
+  }
+}
+
+class _HeatmapCard extends StatelessWidget {
+  const _HeatmapCard({required this.entries});
+  final List<Entry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final now = DateTime.now();
+    final since = now.subtract(const Duration(days: 60));
+    final counts = List.generate(8, (_) => List<int>.filled(7, 0));
+    var max = 0;
+    for (final e in entries) {
+      if (e.occurredAt.isBefore(since)) continue;
+      final l = e.occurredAt.toLocal();
+      final row = (l.hour ~/ 3).clamp(0, 7);
+      final col = (l.weekday - 1).clamp(0, 6);
+      counts[row][col]++;
+      if (counts[row][col] > max) max = counts[row][col];
+    }
+    if (max == 0) return const SizedBox.shrink();
+
+    return Container(
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+      ),
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.grid_view_rounded, size: 18, color: scheme.primary),
+              const SizedBox(width: 8),
+              Text(
+                'WHEN YOUR FAILURES CLUSTER',
+                style: TextStyle(
+                  color: scheme.primary,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 11,
+                  letterSpacing: 1.0,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Last 60 days, local time',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+          ),
+          const SizedBox(height: 14),
+          _HeatmapGrid(counts: counts, maxCount: max),
+          const SizedBox(height: 10),
+          _HeatmapLegend(maxCount: max),
+        ],
+      ),
+    );
+  }
+}
+
+class _HeatmapGrid extends StatelessWidget {
+  const _HeatmapGrid({required this.counts, required this.maxCount});
+  final List<List<int>> counts;
+  final int maxCount;
+
+  static const _weekdayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final base = scheme.primary;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const labelW = 28.0;
+        const gap = 4.0;
+        final cellW = ((constraints.maxWidth - labelW) / 7) - gap;
+        final cellH = math.min(cellW, 24.0);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const SizedBox(width: labelW),
+                for (var c = 0; c < 7; c++)
+                  Padding(
+                    padding: EdgeInsets.only(right: c < 6 ? gap : 0),
+                    child: SizedBox(
+                      width: cellW,
+                      child: Text(
+                        _weekdayLabels[c],
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            for (var r = 0; r < 8; r++)
+              Padding(
+                padding: EdgeInsets.only(bottom: r < 7 ? gap : 0),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: labelW,
+                      child: Text(
+                        _Heatmap._hourLabels[r],
+                        style: TextStyle(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ),
+                    for (var c = 0; c < 7; c++)
+                      Padding(
+                        padding: EdgeInsets.only(right: c < 6 ? gap : 0),
+                        child: _HeatmapCell(
+                          count: counts[r][c],
+                          maxCount: maxCount,
+                          baseColor: base,
+                          width: cellW,
+                          height: cellH,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _HeatmapCell extends StatelessWidget {
+  const _HeatmapCell({
+    required this.count,
+    required this.maxCount,
+    required this.baseColor,
+    required this.width,
+    required this.height,
+  });
+  final int count;
+  final int maxCount;
+  final Color baseColor;
+  final double width;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = maxCount == 0 ? 0.0 : (count / maxCount);
+    final alpha = count == 0 ? 0.05 : (0.18 + t * 0.72);
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        color: baseColor.withValues(alpha: alpha),
+        borderRadius: BorderRadius.circular(5),
+      ),
+    );
+  }
+}
+
+class _HeatmapLegend extends StatelessWidget {
+  const _HeatmapLegend({required this.maxCount});
+  final int maxCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        Text('fewer',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                )),
+        const SizedBox(width: 6),
+        for (final a in [0.18, 0.4, 0.6, 0.85])
+          Container(
+            width: 14,
+            height: 14,
+            margin: const EdgeInsets.symmetric(horizontal: 1),
+            decoration: BoxDecoration(
+              color: scheme.primary.withValues(alpha: a),
+              borderRadius: BorderRadius.circular(3),
+            ),
+          ),
+        const SizedBox(width: 6),
+        Text('more ($maxCount)',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                )),
+      ],
+    );
+  }
+}
+
+// ---- Card -------------------------------------------------------------------
+
+class _InsightCard extends ConsumerWidget {
+  const _InsightCard({required this.insight, this.isTopPriority = false});
+  final Insight insight;
+  final bool isTopPriority;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final palette = _paletteFor(insight.kind, Theme.of(context).brightness);
+    final scheme = Theme.of(context).colorScheme;
+    final entriesAsync = ref.watch(entriesStreamProvider);
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => _showEvidenceSheet(context, insight),
+        child: Ink(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                palette.tint,
+                palette.tint.withValues(alpha: 0.55),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: palette.accent.withValues(alpha: 0.18),
+            ),
+          ),
+          padding: const EdgeInsets.all(18),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(palette.icon, color: palette.accent, size: 20),
-                  const SizedBox(width: 8),
-                  Text(
-                    _labelFor(insight.kind),
-                    style: TextStyle(
-                      color: palette.accent,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12,
-                      letterSpacing: 0.5,
+                  _IconBadge(palette: palette),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Text(
+                              _labelFor(insight.kind),
+                              style: TextStyle(
+                                color: palette.accent,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 11,
+                                letterSpacing: 0.8,
+                              ),
+                            ),
+                            if (isTopPriority) ...[
+                              const SizedBox(width: 8),
+                              const _TopPriorityPill(),
+                            ],
+                            const Spacer(),
+                            if (insight.evidenceIds.isNotEmpty)
+                              _CountPill(
+                                count: insight.evidenceIds.length,
+                                palette: palette,
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          insight.title,
+                          style:
+                              Theme.of(context).textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                    height: 1.25,
+                                    color: scheme.onSurface,
+                                  ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          insight.body,
+                          style:
+                              Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    color: scheme.onSurfaceVariant,
+                                    height: 1.35,
+                                  ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
-              Text(
-                insight.title,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
+              entriesAsync.maybeWhen(
+                data: (entries) {
+                  if (insight.kind == InsightKind.cost ||
+                      insight.kind == InsightKind.improvement ||
+                      insight.evidenceIds.length < 2) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 14),
+                    child: _SparklineStrip(
+                      insight: insight,
+                      entries: entries,
+                      palette: palette,
                     ),
+                  );
+                },
+                orElse: () => const SizedBox.shrink(),
               ),
-              const SizedBox(height: 4),
-              Text(insight.body, style: Theme.of(context).textTheme.bodyMedium),
               if (insight.suggestion != null) ...[
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: palette.accent.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(Icons.lightbulb_outline, size: 16, color: palette.accent),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          insight.suggestion!,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
-                    ],
-                  ),
+                const SizedBox(height: 14),
+                _SuggestionBlock(
+                  suggestion: insight.suggestion!,
+                  palette: palette,
                 ),
               ],
             ],
@@ -112,11 +761,275 @@ class _InsightCard extends StatelessWidget {
   }
 }
 
+class _TopPriorityPill extends StatelessWidget {
+  const _TopPriorityPill();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: scheme.onSurface,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        'TOP',
+        style: TextStyle(
+          color: scheme.surface,
+          fontWeight: FontWeight.w800,
+          fontSize: 9,
+          letterSpacing: 0.8,
+        ),
+      ),
+    );
+  }
+}
+
+class _IconBadge extends StatelessWidget {
+  const _IconBadge({required this.palette});
+  final _Palette palette;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        color: palette.accent,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: palette.accent.withValues(alpha: 0.25),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Icon(palette.icon, color: Colors.white, size: 22),
+    );
+  }
+}
+
+class _CountPill extends StatelessWidget {
+  const _CountPill({required this.count, required this.palette});
+  final int count;
+  final _Palette palette;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+      decoration: BoxDecoration(
+        color: palette.accent.withValues(alpha: 0.13),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        '$count ${count == 1 ? 'entry' : 'entries'}',
+        style: TextStyle(
+          color: palette.accent,
+          fontWeight: FontWeight.w600,
+          fontSize: 11,
+        ),
+      ),
+    );
+  }
+}
+
+class _SparklineStrip extends StatelessWidget {
+  const _SparklineStrip({
+    required this.insight,
+    required this.entries,
+    required this.palette,
+  });
+  final Insight insight;
+  final List<Entry> entries;
+  final _Palette palette;
+
+  static const _days = 30;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final idSet = insight.evidenceIds.toSet();
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+
+    final hits = List<bool>.filled(_days, false);
+    for (final e in entries) {
+      if (e.id == null || !idSet.contains(e.id)) continue;
+      final l = e.occurredAt.toLocal();
+      final eDay = DateTime(l.year, l.month, l.day);
+      final delta = today.difference(eDay).inDays;
+      if (delta >= 0 && delta < _days) {
+        hits[_days - 1 - delta] = true;
+      }
+    }
+    if (!hits.contains(true)) return const SizedBox.shrink();
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Text(
+          '30d',
+          style: TextStyle(
+            color: scheme.onSurfaceVariant,
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.5,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, c) {
+              const gap = 1.5;
+              final cellW = (c.maxWidth - gap * (_days - 1)) / _days;
+              return Row(
+                children: [
+                  for (var i = 0; i < _days; i++) ...[
+                    Container(
+                      width: cellW,
+                      height: 14,
+                      decoration: BoxDecoration(
+                        color: hits[i]
+                            ? palette.accent
+                            : palette.accent.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    if (i < _days - 1) const SizedBox(width: gap),
+                  ],
+                ],
+              );
+            },
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          'today',
+          style: TextStyle(
+            color: scheme.onSurfaceVariant,
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.5,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SuggestionBlock extends StatelessWidget {
+  const _SuggestionBlock({required this.suggestion, required this.palette});
+  final String suggestion;
+  final _Palette palette;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.7),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: palette.accent.withValues(alpha: 0.2)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.tips_and_updates_outlined,
+              size: 18, color: palette.accent),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'TRY',
+                  style: TextStyle(
+                    color: palette.accent,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 10,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  suggestion,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurface,
+                        fontWeight: FontWeight.w500,
+                      ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---- Animation --------------------------------------------------------------
+
+class _AnimatedReveal extends StatefulWidget {
+  const _AnimatedReveal({required this.child, this.delayMs = 0});
+  final Widget child;
+  final int delayMs;
+
+  @override
+  State<_AnimatedReveal> createState() => _AnimatedRevealState();
+}
+
+class _AnimatedRevealState extends State<_AnimatedReveal>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 320),
+    );
+    Future.delayed(Duration(milliseconds: widget.delayMs), () {
+      if (mounted) _ctrl.forward();
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, child) {
+        final t = Curves.easeOutCubic.transform(_ctrl.value);
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, (1 - t) * 12),
+            child: child,
+          ),
+        );
+      },
+      child: widget.child,
+    );
+  }
+}
+
+// ---- Evidence sheet ---------------------------------------------------------
+
 void _showEvidenceSheet(BuildContext context, Insight insight) {
   showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
+    backgroundColor: Theme.of(context).colorScheme.surface,
     builder: (ctx) => _EvidenceSheet(insight: insight),
   );
 }
@@ -130,6 +1043,7 @@ class _EvidenceSheet extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final entriesAsync = ref.watch(entriesStreamProvider);
+    final palette = _paletteFor(insight.kind, Theme.of(context).brightness);
 
     return DraggableScrollableSheet(
       expand: false,
@@ -138,19 +1052,33 @@ class _EvidenceSheet extends ConsumerWidget {
       maxChildSize: 0.9,
       builder: (_, scrollController) {
         return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(insight.title, style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 12),
+              Row(
+                children: [
+                  _IconBadge(palette: palette),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      insight.title,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
               Expanded(
                 child: entriesAsync.when(
                   loading: () =>
                       const Center(child: CircularProgressIndicator()),
                   error: (e, _) => Text(
                     "Couldn't load entries: $e",
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.error),
                   ),
                   data: (entries) =>
                       _evidenceList(context, entries, scrollController),
@@ -245,29 +1173,48 @@ class _EvidenceTile extends StatelessWidget {
   }
 }
 
+// ---- States -----------------------------------------------------------------
+
 class _EmptyState extends StatelessWidget {
   const _EmptyState();
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.insights, size: 56, color: Theme.of(context).colorScheme.outline),
-            const SizedBox(height: 16),
+            Container(
+              width: 96,
+              height: 96,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: scheme.primaryContainer.withValues(alpha: 0.5),
+              ),
+              child: Icon(
+                Icons.insights_rounded,
+                size: 48,
+                color: scheme.primary,
+              ),
+            ),
+            const SizedBox(height: 20),
             Text(
               'No patterns yet',
-              style: Theme.of(context).textTheme.titleMedium,
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             Text(
-              'Log a few failures and patterns will appear here.',
+              'Log a few failures and the engine will start surfacing patterns, '
+              'chains, and what they cost you.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    color: scheme.onSurfaceVariant,
+                    height: 1.4,
                   ),
             ),
           ],
@@ -296,9 +1243,16 @@ class _ErrorState extends StatelessWidget {
   }
 }
 
+// ---- Palette ----------------------------------------------------------------
+
 class _Palette {
-  const _Palette({required this.accent, required this.icon});
+  const _Palette({
+    required this.accent,
+    required this.tint,
+    required this.icon,
+  });
   final Color accent;
+  final Color tint;
   final IconData icon;
 }
 
@@ -307,23 +1261,35 @@ _Palette _paletteFor(InsightKind kind, Brightness brightness) {
   switch (kind) {
     case InsightKind.pattern:
       return _Palette(
-        accent: isDark ? Colors.blue.shade300 : Colors.blue.shade700,
-        icon: Icons.timeline,
+        accent: isDark ? Colors.blue.shade300 : Colors.blue.shade600,
+        tint: isDark
+            ? Colors.blue.shade900.withValues(alpha: 0.25)
+            : Colors.blue.shade50,
+        icon: Icons.timeline_rounded,
       );
     case InsightKind.chain:
       return _Palette(
-        accent: isDark ? Colors.orange.shade300 : Colors.orange.shade800,
-        icon: Icons.link,
+        accent: isDark ? Colors.orange.shade300 : Colors.deepOrange.shade600,
+        tint: isDark
+            ? Colors.deepOrange.shade900.withValues(alpha: 0.25)
+            : Colors.deepOrange.shade50,
+        icon: Icons.link_rounded,
       );
     case InsightKind.cost:
       return _Palette(
-        accent: isDark ? Colors.red.shade300 : Colors.red.shade700,
-        icon: Icons.payments_outlined,
+        accent: isDark ? Colors.red.shade300 : Colors.red.shade600,
+        tint: isDark
+            ? Colors.red.shade900.withValues(alpha: 0.25)
+            : Colors.red.shade50,
+        icon: Icons.payments_rounded,
       );
     case InsightKind.improvement:
       return _Palette(
-        accent: isDark ? Colors.green.shade300 : Colors.green.shade700,
-        icon: Icons.trending_up,
+        accent: isDark ? Colors.green.shade300 : Colors.green.shade600,
+        tint: isDark
+            ? Colors.green.shade900.withValues(alpha: 0.25)
+            : Colors.green.shade50,
+        icon: Icons.trending_up_rounded,
       );
   }
 }
