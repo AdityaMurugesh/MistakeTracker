@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../domain/models/entry.dart';
 import '../domain/models/insight.dart';
 import '../state/providers.dart';
 
@@ -85,7 +86,7 @@ class _InsightCard extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: palette.accent.withOpacity(0.08),
+                    color: palette.accent.withValues(alpha: 0.08),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Row(
@@ -115,26 +116,133 @@ void _showEvidenceSheet(BuildContext context, Insight insight) {
   showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (ctx) => Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(insight.title, style: Theme.of(ctx).textTheme.titleMedium),
-          const SizedBox(height: 12),
-          Text(
-            insight.evidenceIds.isEmpty
-                ? 'No linked entries yet.'
-                : 'Based on ${insight.evidenceIds.length} entries.',
-            style: Theme.of(ctx).textTheme.bodyMedium,
-          ),
-          // TODO(insights): once entriesStreamProvider exists, look up the
-          // Entry rows for evidenceIds and show them here.
-        ],
-      ),
-    ),
+    isScrollControlled: true,
+    builder: (ctx) => _EvidenceSheet(insight: insight),
   );
+}
+
+class _EvidenceSheet extends ConsumerWidget {
+  const _EvidenceSheet({required this.insight});
+  final Insight insight;
+
+  static const _maxRows = 10;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final entriesAsync = ref.watch(entriesStreamProvider);
+
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.5,
+      minChildSize: 0.3,
+      maxChildSize: 0.9,
+      builder: (_, scrollController) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(insight.title, style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 12),
+              Expanded(
+                child: entriesAsync.when(
+                  loading: () =>
+                      const Center(child: CircularProgressIndicator()),
+                  error: (e, _) => Text(
+                    "Couldn't load entries: $e",
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                  data: (entries) =>
+                      _evidenceList(context, entries, scrollController),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _evidenceList(
+    BuildContext context,
+    List<Entry> entries,
+    ScrollController scrollController,
+  ) {
+    if (insight.evidenceIds.isEmpty) {
+      return Text(
+        'No linked entries yet.',
+        style: Theme.of(context).textTheme.bodyMedium,
+      );
+    }
+
+    final byId = {for (final e in entries) if (e.id != null) e.id!: e};
+    final found = [
+      for (final id in insight.evidenceIds)
+        if (byId.containsKey(id)) byId[id]!
+    ]..sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
+
+    if (found.isEmpty) {
+      return Text(
+        'Linked entries are no longer available.',
+        style: Theme.of(context).textTheme.bodyMedium,
+      );
+    }
+
+    final shown = found.take(_maxRows).toList();
+    final remaining = found.length - shown.length;
+
+    return ListView.separated(
+      controller: scrollController,
+      itemCount: shown.length + (remaining > 0 ? 1 : 0),
+      separatorBuilder: (_, __) => const Divider(height: 1),
+      itemBuilder: (_, i) {
+        if (i == shown.length) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Text(
+              '+ $remaining more',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          );
+        }
+        return _EvidenceTile(entry: shown[i]);
+      },
+    );
+  }
+}
+
+class _EvidenceTile extends StatelessWidget {
+  const _EvidenceTile({required this.entry});
+  final Entry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final subtitleParts = <String>[_formatWhen(entry.occurredAt)];
+    if ((entry.cause ?? '').trim().isNotEmpty) {
+      subtitleParts.add('cause: ${entry.cause!.trim()}');
+    }
+    final money = entry.costMoney ?? 0;
+    final minutes = entry.costMinutes ?? 0;
+    if (money > 0) subtitleParts.add('\$$money');
+    if (minutes > 0) subtitleParts.add('${minutes}m');
+
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      title: Text(entry.what),
+      subtitle: Text(subtitleParts.join(' · ')),
+    );
+  }
+
+  String _formatWhen(DateTime utc) {
+    final local = utc.toLocal();
+    final y = local.year.toString().padLeft(4, '0');
+    final m = local.month.toString().padLeft(2, '0');
+    final d = local.day.toString().padLeft(2, '0');
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mm = local.minute.toString().padLeft(2, '0');
+    return '$y-$m-$d $hh:$mm';
+  }
 }
 
 class _EmptyState extends StatelessWidget {
