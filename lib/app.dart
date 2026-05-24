@@ -10,9 +10,11 @@
 //   void main() => runApp(const ProviderScope(child: MistakeTrackerApp()));
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'ui/home_screen.dart';
 import 'ui/insights_screen.dart';
 import 'ui/settings_screen.dart';
+import 'state/providers.dart';
 
 class MistakeTrackerApp extends StatelessWidget {
   const MistakeTrackerApp({super.key});
@@ -27,14 +29,14 @@ class MistakeTrackerApp extends StatelessWidget {
   }
 }
 
-class _RootShell extends StatefulWidget {
+class _RootShell extends ConsumerStatefulWidget {
   const _RootShell();
 
   @override
-  State<_RootShell> createState() => _RootShellState();
+  ConsumerState<_RootShell> createState() => _RootShellState();
 }
 
-class _RootShellState extends State<_RootShell> {
+class _RootShellState extends ConsumerState<_RootShell> {
   int _index = 0;
 
   static const _screens = <Widget>[
@@ -42,6 +44,16 @@ class _RootShellState extends State<_RootShell> {
     InsightsScreen(),
     SettingsScreen(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    // Initialize notifier after the first frame so ProviderScope is ready.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final notifier = ref.read(notifierProvider);
+      notifier.init();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
