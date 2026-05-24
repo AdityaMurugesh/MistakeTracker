@@ -8,11 +8,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/database.dart';
 import '../data/entry_dao.dart';
+import '../data/export_service.dart';
 import '../domain/models/entry.dart';
 import '../domain/models/forecast.dart';
 import '../domain/models/insight.dart';
 import '../domain/rule_engine.dart';
 import '../domain/suggestion_engine.dart';
+import '../notifications/notifier.dart';
+import '../notifications/time_signal.dart';
 
 // ---- Capture ----------------------------------------------------------------
 
@@ -73,7 +76,22 @@ final narrativeProvider = FutureProvider<String?>((ref) async {
 });
 
 // ---- Reach & Data -----------------------------------------------------------
-// (exportServiceProvider, notifierProvider, timeSignalProvider go here)
+
+/// JSON export of entries via `share_plus`.
+final exportServiceProvider = Provider<ExportService>(
+  (ref) => ExportService(ref.read(entryDaoProvider)),
+);
+
+/// Detects time-of-day patterns and emits notification triggers.
+final timeSignalProvider = Provider<TimeSignal>(
+  (ref) => TimeSignal(ref.read(entryDaoProvider)),
+);
+
+/// Local notifications glue (permission handling + scheduling).
+final notifierProvider = Provider<LocalNotifier>((ref) => LocalNotifier());
+
+/// UI flag: whether the user has granted notification permission.
+final notificationsEnabledProvider = StateProvider<bool>((ref) => false);
 
 // ---- Web fallback DAO -------------------------------------------------------
 
