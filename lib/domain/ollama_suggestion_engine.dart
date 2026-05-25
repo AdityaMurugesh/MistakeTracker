@@ -355,6 +355,30 @@ class OllamaSuggestionEngine
     return '$y-$m-$d $hh:$mm';
   }
 
+  /// Fire-and-forget request that asks Ollama to generate exactly 1 token.
+  /// Loads the model into memory so the first real analyze/narrative/outlook
+  /// call doesn't pay the cold-start hit. Safe to ignore the result and any
+  /// errors — this is opportunistic.
+  Future<void> warmup() async {
+    final uri = Uri.parse('$host/api/generate');
+    try {
+      await _client
+          .post(
+            uri,
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'model': model,
+              'prompt': 'ok',
+              'stream': false,
+              'options': {'num_predict': 1, 'temperature': 0.0},
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+    } catch (_) {
+      // Best-effort; ignore failures.
+    }
+  }
+
   void dispose() => _client.close();
 }
 
