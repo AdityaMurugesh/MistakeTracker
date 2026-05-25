@@ -13,6 +13,111 @@ import 'package:flutter/services.dart';
 
 import '../state/providers.dart';
 
+class _AiInsightsSection extends ConsumerStatefulWidget {
+  @override
+  ConsumerState<_AiInsightsSection> createState() => _AiInsightsSectionState();
+}
+
+class _AiInsightsSectionState extends ConsumerState<_AiInsightsSection> {
+  late final TextEditingController _hostCtl;
+  late final TextEditingController _modelCtl;
+  bool _bound = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _hostCtl = TextEditingController();
+    _modelCtl = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _hostCtl.dispose();
+    _modelCtl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = ref.watch(aiSettingsProvider);
+
+    // Seed controllers once when the persisted values arrive.
+    if (!_bound) {
+      _hostCtl.text = ai.host;
+      _modelCtl.text = ai.model;
+      _bound = true;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('AI insights',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 4),
+        const Text(
+          'Swap the rule-based engine for a local LLM via Ollama. Falls back to the rule engine on any error.',
+          style: TextStyle(fontSize: 12, color: Colors.black54),
+        ),
+        const SizedBox(height: 8),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Use AI insights'),
+          subtitle: Text('Model: ${ai.model}  •  ${ai.host}',
+              style: const TextStyle(fontSize: 12)),
+          value: ai.enabled,
+          onChanged: (v) =>
+              ref.read(aiSettingsProvider.notifier).setEnabled(v),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _hostCtl,
+          decoration: const InputDecoration(
+            labelText: 'Ollama host',
+            helperText:
+                '10.0.2.2 = host machine from Android emulator. Use localhost on iOS sim.',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          onSubmitted: (v) =>
+              ref.read(aiSettingsProvider.notifier).setHost(v.trim()),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _modelCtl,
+          decoration: const InputDecoration(
+            labelText: 'Model',
+            helperText: 'e.g. llama3.2, qwen2.5:14b',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          onSubmitted: (v) =>
+              ref.read(aiSettingsProvider.notifier).setModel(v.trim()),
+        ),
+        const SizedBox(height: 6),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton.icon(
+            onPressed: () {
+              ref
+                  .read(aiSettingsProvider.notifier)
+                  .setHost(_hostCtl.text.trim());
+              ref
+                  .read(aiSettingsProvider.notifier)
+                  .setModel(_modelCtl.text.trim());
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('AI settings saved'),
+                duration: Duration(seconds: 1),
+              ));
+            },
+            icon: const Icon(Icons.save_outlined, size: 18),
+            label: const Text('Save host / model'),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
@@ -108,6 +213,10 @@ class SettingsScreen extends ConsumerWidget {
                 );
               },
             ),
+            const SizedBox(height: 12),
+            _AiInsightsSection(),
+            const SizedBox(height: 18),
+            const Divider(),
             const SizedBox(height: 12),
             const Text('Appearance', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),

@@ -27,6 +27,9 @@ dependencies:
   # Export
   share_plus: ^9.0.0
 
+  # LLM (v2 SuggestionEngine impl — talks to a local Ollama server)
+  http: ^1.2.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

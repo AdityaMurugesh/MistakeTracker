@@ -27,7 +27,7 @@ Each deferred feature has a documented seam in the v1 code:
 | v2 feature | Extension point in v1 |
 |---|---|
 | Cloud sync (Firebase / Supabase) | Swap the `EntryDao` impl behind `entryDaoProvider` |
-| LLM-powered suggestions | Add an `LLMEngine` that implements `SuggestionEngine`; `Insights` consumes the interface, not the impl |
+| LLM-powered suggestions | Add an `LLMEngine` that implements `SuggestionEngine`; `Insights` consumes the interface, not the impl — **shipped as `OllamaSuggestionEngine`, opt-in via Settings** |
 | Calendar-aware notifications | Add a `CalendarSignal` that implements `SignalSource`; `Notifier` subscribes to any number of them |
 | Location- / fitness-aware notifications | Same pattern — new `SignalSource` impls |
 | Positive ("win") log | `Entry.kind` field is already in the schema; v2 only adds UI |
@@ -75,6 +75,28 @@ The v1 `RuleEngine` runs three rule families over your entries, in pure Dart:
 3. **Cost insight** — sum `cost_minutes` and `cost_money` across the lookback window.
 
 All thresholds live as constants in `rule_engine.dart` so they're tweakable in one place. Swapping in an LLM in v2 means writing one `analyze(List<Entry>) -> List<Insight>` method on a new class — the `Insights` UI never sees the engine type, only the interface.
+
+### Optional: AI insights via a local LLM (Ollama)
+
+The `SuggestionEngine` seam isn't just theoretical — we shipped a second implementation, `OllamaSuggestionEngine`, that calls a local [Ollama](https://ollama.com) server and reuses the exact same interface. Toggle it in **Settings → AI insights**.
+
+How it works:
+
+- A small RAG step ranks entries by `severity × recency` and sends the top ~40 to the model, keeping the prompt under ~2k tokens so a 3B model like `llama3.2` responds in seconds.
+- The model is asked to return JSON (`format: 'json'` on the Ollama API) which is parsed into `List<Insight>` — same shape the rule engine produces.
+- A `FallbackSuggestionEngine` wraps the LLM call: any error (server down, model not pulled, timeout, malformed JSON) drops back to `RuleEngine` so the Insights screen never breaks.
+
+Quick setup:
+
+```bash
+# on the machine that will host the LLM (your laptop, not the phone)
+ollama pull llama3.2          # ~2 GB, one-time
+ollama serve                  # usually runs automatically on Windows / macOS
+```
+
+Then in the app: Settings → **Use AI insights** → on. Defaults work for the Android emulator (`http://10.0.2.2:11434` reaches the host machine). For a real Android device, point it at your laptop's LAN IP. For an iOS simulator, use `http://localhost:11434`.
+
+The point of this feature is to **prove the v1/v2 seam works** — same Insights screen, same provider, same `Insight` model class; only the engine implementation changes.
 
 ## Status (v1 scope)
 
