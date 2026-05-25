@@ -33,9 +33,11 @@ class InsightsScreen extends ConsumerWidget {
           ref.invalidate(insightsProvider);
           ref.invalidate(forecastsProvider);
           ref.invalidate(narrativeProvider);
+          ref.invalidate(outlookProvider);
           await ref.read(insightsProvider.future);
           await ref.read(forecastsProvider.future);
           await ref.read(narrativeProvider.future);
+          await ref.read(outlookProvider.future);
         },
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
@@ -71,13 +73,14 @@ class InsightsScreen extends ConsumerWidget {
                 return SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
                   sliver: SliverList.builder(
-                    itemCount: ranked.length + 4,
+                    itemCount: ranked.length + 5,
                     itemBuilder: (context, i) {
                       if (i == 0) return const _NarrativeCard();
                       if (i == 1) return _SummaryHeader(insights: ranked);
                       if (i == 2) return const _ComingUpPanel();
-                      if (i == 3) return const _Heatmap();
-                      final idx = i - 4;
+                      if (i == 3) return const _OutlookCard();
+                      if (i == 4) return const _Heatmap();
+                      final idx = i - 5;
                       final insight = ranked[idx];
                       return _AnimatedReveal(
                         delayMs: 40 * idx,
@@ -223,6 +226,93 @@ class _NarrativeCard extends ConsumerWidget {
                   narrative,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
                         color: Colors.white,
+                        height: 1.4,
+                        fontWeight: FontWeight.w500,
+                      ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+      orElse: () => const SizedBox.shrink(),
+    );
+  }
+}
+
+// ---- Outlook card (LLM-only) ------------------------------------------------
+
+class _OutlookCard extends ConsumerWidget {
+  const _OutlookCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final outlookAsync = ref.watch(outlookProvider);
+    final scheme = Theme.of(context).colorScheme;
+
+    return outlookAsync.maybeWhen(
+      data: (text) {
+        if (text == null || text.isEmpty) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: 16),
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  scheme.tertiaryContainer,
+                  scheme.tertiaryContainer.withValues(alpha: 0.55),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(
+                color: scheme.tertiary.withValues(alpha: 0.22),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: scheme.tertiary.withValues(alpha: 0.10),
+                  blurRadius: 16,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: scheme.tertiary.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        'LOOKING AHEAD',
+                        style: TextStyle(
+                          color: scheme.onTertiaryContainer,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 10,
+                          letterSpacing: 1.0,
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    Icon(
+                      Icons.auto_awesome_rounded,
+                      color: scheme.onTertiaryContainer.withValues(alpha: 0.7),
+                      size: 18,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  text,
+                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                        color: scheme.onTertiaryContainer,
                         height: 1.4,
                         fontWeight: FontWeight.w500,
                       ),

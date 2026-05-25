@@ -19,11 +19,14 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'models/entry.dart';
+import 'models/forecast.dart';
 import 'models/insight.dart';
 import 'narrative_engine.dart';
+import 'outlook_engine.dart';
 import 'suggestion_engine.dart';
 
-class OllamaSuggestionEngine implements SuggestionEngine, NarrativeEngine {
+class OllamaSuggestionEngine
+    implements SuggestionEngine, NarrativeEngine, OutlookEngine {
   final String host;
   final String model;
   final Duration timeout;
@@ -134,6 +137,77 @@ class OllamaSuggestionEngine implements SuggestionEngine, NarrativeEngine {
     final text = (envelope['response'] as String?)?.trim();
     if (text == null || text.isEmpty) {
       throw const OllamaEngineException('Ollama narrative response was empty');
+    }
+    return text;
+  }
+
+  /// Forward-looking: takes the rule engine's structured forecasts plus a
+  /// small RAG'd entry sample and writes a 2-3 sentence "looking ahead"
+  /// paragraph naming a specific upcoming risk window and one preemptive
+  /// action. Returns null when there's nothing actionable to say.
+  @override
+  Future<String?> outlook(
+    List<Entry> entries,
+    List<Forecast> forecasts,
+  ) async {
+    if (forecasts.isEmpty) return null;
+    final topForecasts = forecasts.take(3).toList();
+    final ranked = _rankForPrompt(entries).take(20).toList();
+
+    final buf = StringBuffer();
+    buf.writeln(
+      "You are writing a forward-looking 'heads up' paragraph for a user's failure tracker. The user logs everyday failures; the rule engine has projected the next likely risk windows below. Use the past entries as context to explain WHY each window is risky and suggest ONE specific preemptive action drawn from the user's own past_solution fields when possible. Write 2-3 short sentences, second person, warm coach tone. No emoji, no headers, no markdown. Do not invent forecasts that are not listed.",
+    );
+    buf.writeln();
+    buf.writeln('Upcoming risk windows (soonest first):');
+    for (final f in topForecasts) {
+      buf.write('- "${f.what}" projected for ${_fmtDate(f.nextAt)}');
+      buf.write(' — basis: ${f.basisLabel} (${f.basis} prior occurrences)');
+      buf.writeln();
+    }
+    buf.writeln();
+    buf.writeln('Recent context (most relevant first):');
+    for (final e in ranked) {
+      buf.write('- "${e.what}" on ${_fmtDate(e.occurredAt)}');
+      buf.write(' (sev ${e.severity})');
+      if (e.cause != null && e.cause!.isNotEmpty) buf.write(' cause: ${e.cause}');
+      if (e.solution != null && e.solution!.isNotEmpty) {
+        buf.write(' past_solution: ${e.solution}');
+      }
+      buf.writeln();
+    }
+    buf.writeln();
+    buf.writeln(
+      'Write the looking-ahead paragraph now. Plain text only. Be specific (name the day, the activity, the preemptive action).',
+    );
+
+    final uri = Uri.parse('$host/api/generate');
+    final res = await _client
+        .post(
+          uri,
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'model': model,
+            'prompt': buf.toString(),
+            'stream': false,
+            'options': {
+              'temperature': 0.5,
+              'num_predict': 220,
+            },
+          }),
+        )
+        .timeout(timeout);
+
+    if (res.statusCode != 200) {
+      throw OllamaEngineException(
+        'Ollama outlook returned HTTP ${res.statusCode}: ${res.body}',
+      );
+    }
+
+    final envelope = jsonDecode(res.body) as Map<String, Object?>;
+    final text = (envelope['response'] as String?)?.trim();
+    if (text == null || text.isEmpty) {
+      throw const OllamaEngineException('Ollama outlook response was empty');
     }
     return text;
   }

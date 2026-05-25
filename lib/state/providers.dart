@@ -15,9 +15,11 @@ import '../domain/models/entry.dart';
 import '../domain/models/forecast.dart';
 import '../domain/models/insight.dart';
 import '../domain/fallback_narrative_engine.dart';
+import '../domain/fallback_outlook_engine.dart';
 import '../domain/fallback_suggestion_engine.dart';
 import '../domain/narrative_engine.dart';
 import '../domain/ollama_suggestion_engine.dart';
+import '../domain/outlook_engine.dart';
 import '../domain/rule_engine.dart';
 import '../domain/suggestion_engine.dart';
 import '../notifications/notifier.dart';
@@ -83,6 +85,16 @@ final narrativeEngineProvider = Provider<NarrativeEngine>((ref) {
   return FallbackNarrativeEngine(primary: ollama, fallback: rule);
 });
 
+/// Active OutlookEngine. RuleEngine returns null for outlook so the card
+/// stays hidden when AI is off; when on, the LLM writes a forward-looking
+/// "heads up" paragraph and falls back to null on error.
+final outlookEngineProvider = Provider<OutlookEngine>((ref) {
+  final rule = ref.watch(ruleEngineProvider);
+  final ollama = ref.watch(_ollamaEngineProvider);
+  if (ollama == null) return rule;
+  return FallbackOutlookEngine(primary: ollama, fallback: rule);
+});
+
 /// Insights derived from the current entries via the active suggestion engine.
 /// Watches the engine provider so flipping AI insights on/off re-runs analyze().
 final insightsProvider = FutureProvider<List<Insight>>((ref) async {
@@ -105,6 +117,15 @@ final narrativeProvider = FutureProvider<String?>((ref) async {
   final entries = await ref.watch(entriesStreamProvider.future);
   final engine = ref.watch(narrativeEngineProvider);
   return engine.narrative(entries);
+});
+
+/// Forward-looking "heads up" paragraph derived from entries + forecasts.
+/// Null when the active engine has nothing to say (AI off, or AI errored).
+final outlookProvider = FutureProvider<String?>((ref) async {
+  final entries = await ref.watch(entriesStreamProvider.future);
+  final forecasts = await ref.watch(forecastsProvider.future);
+  final engine = ref.watch(outlookEngineProvider);
+  return engine.outlook(entries, forecasts);
 });
 
 // ---- Reach & Data -----------------------------------------------------------

@@ -23,13 +23,14 @@
 // All thresholds are constants below — tweak in one place.
 
 import 'narrative_engine.dart';
+import 'outlook_engine.dart';
 import 'semantic.dart';
 import 'suggestion_engine.dart';
 import 'models/entry.dart';
 import 'models/forecast.dart';
 import 'models/insight.dart';
 
-class RuleEngine implements SuggestionEngine, NarrativeEngine {
+class RuleEngine implements SuggestionEngine, NarrativeEngine, OutlookEngine {
   // Tweakable thresholds
   static const int minOccurrencesForPattern = 3;
   static const int lookbackDays = 30;
@@ -120,6 +121,14 @@ class RuleEngine implements SuggestionEngine, NarrativeEngine {
 
     return parts.join(' ');
   }
+
+  /// Rule engine has no forward-looking prose — the Coming Up panel
+  /// already renders the structured forecasts. The outlook card is an
+  /// AI-only feature; here it returns null so the card stays hidden when
+  /// AI is off (and as a graceful fallback if the LLM call fails).
+  @override
+  Future<String?> outlook(List<Entry> entries, List<Forecast> forecasts) async =>
+      null;
 
   /// Forward-looking: projects the next likely occurrence of each strong
   /// (what, weekday, hour) pattern. Returned sorted by soonest first.
