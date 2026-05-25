@@ -20,9 +20,10 @@ import 'package:http/http.dart' as http;
 
 import 'models/entry.dart';
 import 'models/insight.dart';
+import 'narrative_engine.dart';
 import 'suggestion_engine.dart';
 
-class OllamaSuggestionEngine implements SuggestionEngine {
+class OllamaSuggestionEngine implements SuggestionEngine, NarrativeEngine {
   final String host;
   final String model;
   final Duration timeout;
@@ -75,6 +76,66 @@ class OllamaSuggestionEngine implements SuggestionEngine {
     }
 
     return _parseInsights(responseText, ranked);
+  }
+
+  /// 1-2 sentence personalised summary of the last 7 days, for the hero
+  /// card. Returns null when there's nothing recent worth surfacing.
+  @override
+  Future<String?> narrative(List<Entry> entries) async {
+    final now = DateTime.now();
+    final weekStart = now.subtract(const Duration(days: 7));
+    final recent = entries
+        .where((e) => !e.occurredAt.isBefore(weekStart))
+        .toList(growable: false);
+    if (recent.isEmpty) return null;
+
+    final buf = StringBuffer();
+    buf.writeln(
+      "You are summarising one week of a user's failure log for a hero card. Write 1-2 short sentences in second person, addressing the user. Be specific (mention what happened most, costs, or a notable cause) but warm — coach, not judge. No emoji, no headers, no markdown.",
+    );
+    buf.writeln();
+    buf.writeln("Last 7 days:");
+    for (final e in recent) {
+      buf.write('- "${e.what}" on ${_fmtDate(e.occurredAt)}');
+      buf.write(' (sev ${e.severity}');
+      if (e.costMinutes != null) buf.write(', ${e.costMinutes}min');
+      if (e.costMoney != null) buf.write(', \$${e.costMoney}');
+      buf.write(')');
+      if (e.cause != null && e.cause!.isNotEmpty) buf.write(' cause: ${e.cause}');
+      buf.writeln();
+    }
+    buf.writeln();
+    buf.writeln('Write the summary now. Plain text only.');
+
+    final uri = Uri.parse('$host/api/generate');
+    final res = await _client
+        .post(
+          uri,
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'model': model,
+            'prompt': buf.toString(),
+            'stream': false,
+            'options': {
+              'temperature': 0.6,
+              'num_predict': 160,
+            },
+          }),
+        )
+        .timeout(timeout);
+
+    if (res.statusCode != 200) {
+      throw OllamaEngineException(
+        'Ollama narrative returned HTTP ${res.statusCode}: ${res.body}',
+      );
+    }
+
+    final envelope = jsonDecode(res.body) as Map<String, Object?>;
+    final text = (envelope['response'] as String?)?.trim();
+    if (text == null || text.isEmpty) {
+      throw const OllamaEngineException('Ollama narrative response was empty');
+    }
+    return text;
   }
 
   /// Score = severity * recency_decay. Sorted high-to-low, capped at

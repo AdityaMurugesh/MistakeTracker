@@ -748,15 +748,15 @@ void main() {
   });
 
   group('RuleEngine — narrative', () {
-    test('returns null when no entries in the last 7 days', () {
-      final n = engine().narrative([
+    test('returns null when no entries in the last 7 days', () async {
+      final n = await engine().narrative([
         mk(id: 1, what: 'x', daysAgo: 30),
       ]);
       expect(n, isNull);
     });
 
-    test('mentions count, dominant what, and total cost', () {
-      final n = engine().narrative([
+    test('mentions count, dominant what, and total cost', () async {
+      final n = await engine().narrative([
         mk(id: 1, what: 'missed gym', daysAgo: 1, costMinutes: 30),
         mk(id: 2, what: 'skipped workout', daysAgo: 2, costMinutes: 30),
         mk(id: 3, what: 'something else',
