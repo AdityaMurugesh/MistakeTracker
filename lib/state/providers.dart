@@ -4,7 +4,9 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../data/database.dart';
 import '../data/entry_dao.dart';
@@ -92,6 +94,61 @@ final notifierProvider = Provider<LocalNotifier>((ref) => LocalNotifier());
 
 /// UI flag: whether the user has granted notification permission.
 final notificationsEnabledProvider = StateProvider<bool>((ref) => false);
+
+// ---- Theme mode persistence ------------------------------------------------
+
+const _kThemeModeKey = 'theme_mode';
+
+class ThemeModeNotifier extends StateNotifier<ThemeMode> {
+  ThemeModeNotifier() : super(ThemeMode.system) {
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final stored = prefs.getString(_kThemeModeKey) ?? 'system';
+      state = _fromString(stored);
+    } catch (_) {
+      // ignore errors and stay on system
+    }
+  }
+
+  ThemeMode _fromString(String s) {
+    switch (s) {
+      case 'light':
+        return ThemeMode.light;
+      case 'dark':
+        return ThemeMode.dark;
+      default:
+        return ThemeMode.system;
+    }
+  }
+
+  String _toString(ThemeMode mode) {
+    switch (mode) {
+      case ThemeMode.light:
+        return 'light';
+      case ThemeMode.dark:
+        return 'dark';
+      case ThemeMode.system:
+      default:
+        return 'system';
+    }
+  }
+
+  Future<void> setMode(ThemeMode mode) async {
+    state = mode;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kThemeModeKey, _toString(mode));
+    } catch (_) {
+      // ignore persistence errors
+    }
+  }
+}
+
+final themeModeProvider = StateNotifierProvider<ThemeModeNotifier, ThemeMode>((ref) => ThemeModeNotifier());
 
 // ---- Web fallback DAO -------------------------------------------------------
 

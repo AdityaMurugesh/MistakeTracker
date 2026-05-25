@@ -16,14 +16,18 @@ import 'ui/insights_screen.dart';
 import 'ui/settings_screen.dart';
 import 'state/providers.dart';
 
-class MistakeTrackerApp extends StatelessWidget {
+class MistakeTrackerApp extends ConsumerWidget {
   const MistakeTrackerApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final themeMode = ref.watch(themeModeProvider);
+
     return MaterialApp(
       title: 'MistakeTracker',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
+      darkTheme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo, brightness: Brightness.dark),
+      themeMode: themeMode,
       home: const _RootShell(),
     );
   }

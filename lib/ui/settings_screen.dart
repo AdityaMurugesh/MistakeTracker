@@ -109,6 +109,26 @@ class SettingsScreen extends ConsumerWidget {
               },
             ),
             const SizedBox(height: 12),
+            const Text('Appearance', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            ListTile(
+              title: const Text('Theme'),
+              trailing: DropdownButton<ThemeMode>(
+                value: ref.watch(themeModeProvider),
+                items: const [
+                  DropdownMenuItem(value: ThemeMode.light, child: Text('Light mode')),
+                  DropdownMenuItem(value: ThemeMode.dark, child: Text('Dark mode')),
+                  DropdownMenuItem(value: ThemeMode.system, child: Text('System settings')),
+                ],
+                onChanged: (mode) async {
+                  if (mode == null) return;
+                  await ref.read(themeModeProvider.notifier).setMode(mode);
+                },
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Divider(),
+            const SizedBox(height: 12),
             const Text('Data', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),
             ElevatedButton.icon(
