@@ -3,7 +3,7 @@
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -55,12 +55,17 @@ final entriesStreamProvider = StreamProvider<List<Entry>>((ref) {
 final ruleEngineProvider = Provider<RuleEngine>((ref) => RuleEngine());
 
 /// Single OllamaSuggestionEngine instance shared between the
-/// SuggestionEngine and NarrativeEngine seams — one engine, one HTTP client,
-/// two interfaces.
+/// SuggestionEngine, NarrativeEngine, and OutlookEngine seams — one engine,
+/// one HTTP client, three interfaces.
 final _ollamaEngineProvider = Provider<OllamaSuggestionEngine?>((ref) {
   final ai = ref.watch(aiSettingsProvider);
   if (!ai.enabled || kIsWeb) return null;
   final ollama = OllamaSuggestionEngine(host: ai.host, model: ai.model);
+  // Pre-warm the model so the first analyze/narrative/outlook call doesn't
+  // pay the cold-start hit. Fire-and-forget — errors are intentionally ignored.
+  unawaited(ollama.warmup().then((_) {
+    debugPrint('[AI] Ollama warmup complete (${ai.model} @ ${ai.host})');
+  }));
   ref.onDispose(ollama.dispose);
   return ollama;
 });
@@ -103,6 +108,15 @@ final insightsProvider = FutureProvider<List<Insight>>((ref) async {
   return engine.analyze(entries);
 });
 
+/// Fast rule-engine insights, always. Used by the UI as an immediate
+/// placeholder while [insightsProvider] is in flight (the LLM call can take
+/// 15-30s). Resolves in tens of milliseconds.
+final ruleInsightsProvider = FutureProvider<List<Insight>>((ref) async {
+  final entries = await ref.watch(entriesStreamProvider.future);
+  final rule = ref.watch(ruleEngineProvider);
+  return rule.analyze(entries);
+});
+
 /// Forward-looking projections from the rule engine. Sorted soonest-first.
 final forecastsProvider = FutureProvider<List<Forecast>>((ref) async {
   final entries = await ref.watch(entriesStreamProvider.future);
@@ -117,6 +131,14 @@ final narrativeProvider = FutureProvider<String?>((ref) async {
   final entries = await ref.watch(entriesStreamProvider.future);
   final engine = ref.watch(narrativeEngineProvider);
   return engine.narrative(entries);
+});
+
+/// Fast rule-engine narrative, always. Same role as [ruleInsightsProvider]:
+/// the UI shows this immediately while the LLM narrative is in flight.
+final ruleNarrativeProvider = FutureProvider<String?>((ref) async {
+  final entries = await ref.watch(entriesStreamProvider.future);
+  final rule = ref.watch(ruleEngineProvider);
+  return rule.narrative(entries);
 });
 
 /// Forward-looking "heads up" paragraph derived from entries + forecasts.

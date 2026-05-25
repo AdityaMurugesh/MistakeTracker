@@ -17,8 +17,10 @@ class InsightsScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final insightsAsync = ref.watch(insightsProvider);
+    final llmAsync = ref.watch(insightsProvider);
+    final ruleAsync = ref.watch(ruleInsightsProvider);
     final entriesAsync = ref.watch(entriesStreamProvider);
+    final aiEnabled = ref.watch(aiSettingsProvider).enabled;
     final scheme = Theme.of(context).colorScheme;
 
     final severityById = <int, int>{
@@ -26,13 +28,24 @@ class InsightsScreen extends ConsumerWidget {
         if (e.id != null) e.id!: e.severity,
     };
 
+    // Effective list: prefer the LLM output once it lands; until then fall
+    // back to the rule-engine list so the screen renders in ~50ms instead of
+    // sitting on a spinner for 15-30s. When AI is off, llmAsync and ruleAsync
+    // resolve at the same time with the same data.
+    final List<Insight>? effective =
+        llmAsync.valueOrNull ?? ruleAsync.valueOrNull;
+    final llmStillCooking =
+        aiEnabled && llmAsync.isLoading && ruleAsync.hasValue;
+
     return Scaffold(
       backgroundColor: scheme.surface,
       body: RefreshIndicator(
         onRefresh: () async {
           ref.invalidate(insightsProvider);
+          ref.invalidate(ruleInsightsProvider);
           ref.invalidate(forecastsProvider);
           ref.invalidate(narrativeProvider);
+          ref.invalidate(ruleNarrativeProvider);
           ref.invalidate(outlookProvider);
           await ref.read(insightsProvider.future);
           await ref.read(forecastsProvider.future);
@@ -53,50 +66,51 @@ class InsightsScreen extends ConsumerWidget {
                 ),
               ),
             ),
-            insightsAsync.when(
-              loading: () => const SliverFillRemaining(
+            if (effective == null)
+              llmAsync.hasError
+                  ? SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: _ErrorState(message: llmAsync.error.toString()),
+                    )
+                  : const SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Center(child: CircularProgressIndicator()),
+                    )
+            else if (effective.isEmpty)
+              const SliverFillRemaining(
                 hasScrollBody: false,
-                child: Center(child: CircularProgressIndicator()),
-              ),
-              error: (err, _) => SliverFillRemaining(
-                hasScrollBody: false,
-                child: _ErrorState(message: err.toString()),
-              ),
-              data: (insights) {
-                if (insights.isEmpty) {
-                  return const SliverFillRemaining(
-                    hasScrollBody: false,
-                    child: _EmptyState(),
-                  );
-                }
-                final ranked = _rankByImpact(insights, severityById);
-                return SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
-                  sliver: SliverList.builder(
-                    itemCount: ranked.length + 5,
-                    itemBuilder: (context, i) {
-                      if (i == 0) return const _NarrativeCard();
-                      if (i == 1) return _SummaryHeader(insights: ranked);
-                      if (i == 2) return const _ComingUpPanel();
-                      if (i == 3) return const _OutlookCard();
-                      if (i == 4) return const _Heatmap();
-                      final idx = i - 5;
-                      final insight = ranked[idx];
-                      return _AnimatedReveal(
-                        delayMs: 40 * idx,
-                        child: Padding(
-                          padding: const EdgeInsets.only(top: 12),
-                          child: _InsightCard(
-                            insight: insight,
-                            isTopPriority: idx == 0,
-                          ),
+                child: _EmptyState(),
+              )
+            else
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+                sliver: SliverList.builder(
+                  itemCount: _rankByImpact(effective, severityById).length + 6,
+                  itemBuilder: (context, i) {
+                    final ranked = _rankByImpact(effective, severityById);
+                    if (i == 0) return const _NarrativeCard();
+                    if (i == 1) {
+                      return _AiCookingPill(visible: llmStillCooking);
+                    }
+                    if (i == 2) return _SummaryHeader(insights: ranked);
+                    if (i == 3) return const _ComingUpPanel();
+                    if (i == 4) return const _OutlookCard();
+                    if (i == 5) return const _Heatmap();
+                    final idx = i - 6;
+                    final insight = ranked[idx];
+                    return _AnimatedReveal(
+                      delayMs: 40 * idx,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: _InsightCard(
+                          insight: insight,
+                          isTopPriority: idx == 0,
                         ),
-                      );
-                    },
-                  ),
-                );
-              },
-            ),
+                      ),
+                    );
+                  },
+                ),
+              ),
           ],
         ),
       ),
@@ -163,8 +177,14 @@ class _NarrativeCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final narrativeAsync = ref.watch(narrativeProvider);
+    final llmAsync = ref.watch(narrativeProvider);
+    final ruleAsync = ref.watch(ruleNarrativeProvider);
     final scheme = Theme.of(context).colorScheme;
+
+    // Same instant-then-swap pattern: render rule narrative immediately,
+    // swap to LLM narrative when it lands.
+    final narrative = llmAsync.valueOrNull ?? ruleAsync.valueOrNull;
+    final narrativeAsync = AsyncValue.data(narrative);
 
     return narrativeAsync.maybeWhen(
       data: (narrative) {
@@ -236,6 +256,64 @@ class _NarrativeCard extends ConsumerWidget {
         );
       },
       orElse: () => const SizedBox.shrink(),
+    );
+  }
+}
+
+// ---- "Polishing with AI" pill ----------------------------------------------
+//
+// Tiny inline indicator that shows above the cards while the LLM is still
+// generating its output. We render rule-engine cards immediately so the
+// screen never blocks on a spinner; this pill signals that the LLM is in
+// flight and the cards will be upgraded shortly.
+
+class _AiCookingPill extends StatelessWidget {
+  const _AiCookingPill({required this.visible});
+  final bool visible;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!visible) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: scheme.secondaryContainer.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: scheme.secondary.withValues(alpha: 0.25),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    scheme.onSecondaryContainer,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Polishing with AI…',
+                style: TextStyle(
+                  color: scheme.onSecondaryContainer,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
