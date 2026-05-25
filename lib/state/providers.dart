@@ -14,7 +14,9 @@ import '../data/export_service.dart';
 import '../domain/models/entry.dart';
 import '../domain/models/forecast.dart';
 import '../domain/models/insight.dart';
+import '../domain/fallback_narrative_engine.dart';
 import '../domain/fallback_suggestion_engine.dart';
+import '../domain/narrative_engine.dart';
 import '../domain/ollama_suggestion_engine.dart';
 import '../domain/rule_engine.dart';
 import '../domain/suggestion_engine.dart';
@@ -50,17 +52,35 @@ final entriesStreamProvider = StreamProvider<List<Entry>>((ref) {
 /// SuggestionEngine contract (forecasts, narrative).
 final ruleEngineProvider = Provider<RuleEngine>((ref) => RuleEngine());
 
+/// Single OllamaSuggestionEngine instance shared between the
+/// SuggestionEngine and NarrativeEngine seams — one engine, one HTTP client,
+/// two interfaces.
+final _ollamaEngineProvider = Provider<OllamaSuggestionEngine?>((ref) {
+  final ai = ref.watch(aiSettingsProvider);
+  if (!ai.enabled || kIsWeb) return null;
+  final ollama = OllamaSuggestionEngine(host: ai.host, model: ai.model);
+  ref.onDispose(ollama.dispose);
+  return ollama;
+});
+
 /// Active SuggestionEngine. When AI insights are off, this is the RuleEngine
 /// directly. When on, it's an OllamaSuggestionEngine wrapped in a fallback
 /// that drops to RuleEngine on any error — so the Insights screen never
 /// breaks even if Ollama isn't running.
 final suggestionEngineProvider = Provider<SuggestionEngine>((ref) {
   final rule = ref.watch(ruleEngineProvider);
-  final ai = ref.watch(aiSettingsProvider);
-  if (!ai.enabled || kIsWeb) return rule;
-  final ollama = OllamaSuggestionEngine(host: ai.host, model: ai.model);
-  ref.onDispose(ollama.dispose);
+  final ollama = ref.watch(_ollamaEngineProvider);
+  if (ollama == null) return rule;
   return FallbackSuggestionEngine(primary: ollama, fallback: rule);
+});
+
+/// Active NarrativeEngine. Same swap pattern as suggestionEngineProvider,
+/// but for the hero card's one-paragraph summary.
+final narrativeEngineProvider = Provider<NarrativeEngine>((ref) {
+  final rule = ref.watch(ruleEngineProvider);
+  final ollama = ref.watch(_ollamaEngineProvider);
+  if (ollama == null) return rule;
+  return FallbackNarrativeEngine(primary: ollama, fallback: rule);
 });
 
 /// Insights derived from the current entries via the active suggestion engine.
@@ -79,10 +99,11 @@ final forecastsProvider = FutureProvider<List<Forecast>>((ref) async {
 });
 
 /// Short narrative summary of the last 7 days. Null when there's no
-/// recent activity.
+/// recent activity. Watches the engine provider so flipping AI insights on
+/// re-runs the narrative through the LLM.
 final narrativeProvider = FutureProvider<String?>((ref) async {
   final entries = await ref.watch(entriesStreamProvider.future);
-  final engine = ref.read(ruleEngineProvider);
+  final engine = ref.watch(narrativeEngineProvider);
   return engine.narrative(entries);
 });
 

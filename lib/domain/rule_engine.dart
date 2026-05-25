@@ -22,13 +22,14 @@
 //
 // All thresholds are constants below — tweak in one place.
 
+import 'narrative_engine.dart';
 import 'semantic.dart';
 import 'suggestion_engine.dart';
 import 'models/entry.dart';
 import 'models/forecast.dart';
 import 'models/insight.dart';
 
-class RuleEngine implements SuggestionEngine {
+class RuleEngine implements SuggestionEngine, NarrativeEngine {
   // Tweakable thresholds
   static const int minOccurrencesForPattern = 3;
   static const int lookbackDays = 30;
@@ -75,7 +76,8 @@ class RuleEngine implements SuggestionEngine {
   /// Composes a short narrative summary of the user's last 7 days, suitable
   /// for a hero card at the top of the Insights screen. Reads from the same
   /// data the rules use; the wording is templated, not generated.
-  String? narrative(List<Entry> entries) {
+  @override
+  Future<String?> narrative(List<Entry> entries) async {
     final now = _now();
     final weekStart = now.subtract(const Duration(days: 7));
     final week = entries
