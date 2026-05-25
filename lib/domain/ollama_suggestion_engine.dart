@@ -108,7 +108,9 @@ class OllamaSuggestionEngine
       buf.writeln();
     }
     buf.writeln();
-    buf.writeln('Write the summary now. Plain text only.');
+    buf.writeln(
+      'Write the summary now. Plain text only. Never mention entry IDs in the output.',
+    );
 
     final uri = Uri.parse('$host/api/generate');
     final res = await _client
@@ -178,7 +180,7 @@ class OllamaSuggestionEngine
     }
     buf.writeln();
     buf.writeln(
-      'Write the looking-ahead paragraph now. Plain text only. Be specific (name the day, the activity, the preemptive action).',
+      'Write the looking-ahead paragraph now. Plain text only. Be specific (name the day, the activity, the preemptive action). Never mention entry IDs in the output — refer to entries by what happened, not by id.',
     );
 
     final uri = Uri.parse('$host/api/generate');
@@ -269,6 +271,10 @@ class OllamaSuggestionEngine
     buf.writeln();
     buf.writeln(
       'Return 3-6 insights. Prefer specific observations over generic advice. Do not invent entries that are not listed above.',
+    );
+    buf.writeln();
+    buf.writeln(
+      'IMPORTANT: never mention entry IDs in the "title", "body", or "suggestion" text. Do not write things like "(ids 4, 5, 6)" or "id=1" in prose. Entry IDs belong ONLY in the "evidence_ids" array. The prose should read naturally to an end user who has no idea IDs exist.',
     );
     return buf.toString();
   }
