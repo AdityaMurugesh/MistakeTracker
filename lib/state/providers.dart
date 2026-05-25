@@ -14,6 +14,8 @@ import '../data/export_service.dart';
 import '../domain/models/entry.dart';
 import '../domain/models/forecast.dart';
 import '../domain/models/insight.dart';
+import '../domain/fallback_suggestion_engine.dart';
+import '../domain/ollama_suggestion_engine.dart';
 import '../domain/rule_engine.dart';
 import '../domain/suggestion_engine.dart';
 import '../notifications/notifier.dart';
@@ -44,21 +46,28 @@ final entriesStreamProvider = StreamProvider<List<Entry>>((ref) {
 
 // ---- Insights ---------------------------------------------------------------
 
+/// Concrete RuleEngine — also used directly for features beyond the
+/// SuggestionEngine contract (forecasts, narrative).
+final ruleEngineProvider = Provider<RuleEngine>((ref) => RuleEngine());
+
+/// Active SuggestionEngine. When AI insights are off, this is the RuleEngine
+/// directly. When on, it's an OllamaSuggestionEngine wrapped in a fallback
+/// that drops to RuleEngine on any error — so the Insights screen never
+/// breaks even if Ollama isn't running.
 final suggestionEngineProvider = Provider<SuggestionEngine>((ref) {
-  return RuleEngine();
+  final rule = ref.watch(ruleEngineProvider);
+  final ai = ref.watch(aiSettingsProvider);
+  if (!ai.enabled || kIsWeb) return rule;
+  final ollama = OllamaSuggestionEngine(host: ai.host, model: ai.model);
+  ref.onDispose(ollama.dispose);
+  return FallbackSuggestionEngine(primary: ollama, fallback: rule);
 });
 
-/// Concrete RuleEngine for features beyond the SuggestionEngine contract
-/// (e.g. forward-looking forecasts).
-final ruleEngineProvider = Provider<RuleEngine>((ref) {
-  final engine = ref.watch(suggestionEngineProvider);
-  return engine as RuleEngine;
-});
-
-/// Insights derived from the current entries via the rule engine.
+/// Insights derived from the current entries via the active suggestion engine.
+/// Watches the engine provider so flipping AI insights on/off re-runs analyze().
 final insightsProvider = FutureProvider<List<Insight>>((ref) async {
   final entries = await ref.watch(entriesStreamProvider.future);
-  final engine = ref.read(suggestionEngineProvider);
+  final engine = ref.watch(suggestionEngineProvider);
   return engine.analyze(entries);
 });
 
@@ -149,6 +158,77 @@ class ThemeModeNotifier extends StateNotifier<ThemeMode> {
 }
 
 final themeModeProvider = StateNotifierProvider<ThemeModeNotifier, ThemeMode>((ref) => ThemeModeNotifier());
+
+// ---- AI insights settings ---------------------------------------------------
+
+/// On-device default for the Android emulator: 10.0.2.2 is the host machine
+/// where Ollama is running. Override in Settings for a real device or a
+/// different host.
+const _kAiDefaultHost = 'http://10.0.2.2:11434';
+const _kAiDefaultModel = 'llama3.2';
+const _kAiEnabledKey = 'ai_enabled';
+const _kAiHostKey = 'ai_host';
+const _kAiModelKey = 'ai_model';
+
+class AiSettings {
+  final bool enabled;
+  final String host;
+  final String model;
+  const AiSettings({required this.enabled, required this.host, required this.model});
+
+  AiSettings copyWith({bool? enabled, String? host, String? model}) =>
+      AiSettings(
+        enabled: enabled ?? this.enabled,
+        host: host ?? this.host,
+        model: model ?? this.model,
+      );
+}
+
+class AiSettingsNotifier extends StateNotifier<AiSettings> {
+  AiSettingsNotifier()
+      : super(const AiSettings(
+          enabled: false,
+          host: _kAiDefaultHost,
+          model: _kAiDefaultModel,
+        )) {
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      state = AiSettings(
+        enabled: prefs.getBool(_kAiEnabledKey) ?? false,
+        host: prefs.getString(_kAiHostKey) ?? _kAiDefaultHost,
+        model: prefs.getString(_kAiModelKey) ?? _kAiDefaultModel,
+      );
+    } catch (_) {
+      // keep defaults
+    }
+  }
+
+  Future<void> setEnabled(bool v) async {
+    state = state.copyWith(enabled: v);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kAiEnabledKey, v);
+  }
+
+  Future<void> setHost(String v) async {
+    state = state.copyWith(host: v);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kAiHostKey, v);
+  }
+
+  Future<void> setModel(String v) async {
+    state = state.copyWith(model: v);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kAiModelKey, v);
+  }
+}
+
+final aiSettingsProvider =
+    StateNotifierProvider<AiSettingsNotifier, AiSettings>(
+        (ref) => AiSettingsNotifier());
 
 // ---- Web fallback DAO -------------------------------------------------------
 
